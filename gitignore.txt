@@ -64,6 +64,9 @@ db.sqlite3-journal
 # Flask stuff:
 instance/
 .webassets-cache
+uploads/
+output/
+*.sqlite
 
 # Scrapy stuff:
 .scrapy
@@ -151,9 +154,9 @@ activemq-data/
 .env
 .envrc
 .venv
-env/
+.env/
 venv/
-ENV/
+.env/
 env.bak/
 venv.bak/
 
@@ -216,19 +219,3 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
-
-# VIM POC
-__pycache__/
-*.pyc
-.env
-enriched.json
-logs
-.venv
-.idea
-venv
-uploads 
-invoice_samples
-chroma_db
-DB.Browser.for.SQLite-v3.13.1-win32
-

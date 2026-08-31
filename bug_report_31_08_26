@@ -1,0 +1,337 @@
+# Backend Bug Report — Vendor Invoice Management POC
+
+---
+
+## 🔴 Critical Bugs
+
+### 1. Hardcoded Absolute Path in `run_validation.py`
+**File:** [`run_validation.py:19`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/validation_setup/validation/run_validation.py#L19)
+
+```python
+# BUG: Hardcoded to a specific developer's machine path
+enriched_file = Path(
+    r"C:\Users\SPAR-PUNE-042\Downloads\VIM\output\enriched.json"
+)
+```
+
+**Impact:** **Crashes on every machine except the original developer's.** The file path should instead use the dynamic `config.OUTPUT_DIR` / `json_store.ENRICHED_PATH` already defined in the project. This means validation is **completely broken** in production/any other developer environment.
+
+**Fix:**
+```python
+from vim.extraction.json_store import ENRICHED_PATH
+enriched_file = ENRICHED_PATH
+```
+
+---
+
+### 2. Passwords Stored in Plaintext
+**File:** [`vim_controller.py:56`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L56), [`vim_controller.py:139`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L139)
+
+```python
+# Login: plaintext comparison
+if this_user.PasswordHash == password:  # no hashing!
+
+# Add user: plaintext storage
+PasswordHash=request.form['password'],  # stored as-is
+```
+
+**Impact:** A critical security vulnerability. Any database leak exposes all user passwords. The field is even called `PasswordHash` yet stores raw text.
+
+**Fix:** Use `werkzeug.security.generate_password_hash` / `check_password_hash`.
+
+---
+
+### 3. `admin_required` Does Not Check `login_required` First
+**File:** [`vim_controller.py:23-30`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L23)
+
+```python
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if session.get('role') != 'admin':
+            flash("Admin access required.", "danger")
+            return redirect(url_for('login'))   # ← no login check
+        return view(*args, **kwargs)
+    return wrapped
+```
+
+**Impact:** An unauthenticated user with no session gets the confusing "Admin access required" flash instead of being properly redirected as unauthenticated. Also, admin routes are never stacked with `@login_required`, so authentication state is only checked implicitly via `role`.
+
+---
+
+### 4. `app` Name Conflict / Stale Global in `app.py`
+**File:** [`app.py:13`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/app.py#L13)
+
+```python
+app = None          # global set to None
+...
+def create_app():
+    app = Flask(__name__)  # local variable shadows the global
+    ...
+    return app
+
+app = create_app()  # overwrites global — works by accident
+```
+
+**Impact:** The `app = None` at module level and the re-assignment inside `create_app()` creates a local variable (not the global). This works *only* because `app = create_app()` then assigns at module level. But any code that tries to reference the global `app` before `create_app()` returns will see `None`. Also `app.debug = True` is set inside the factory but `app.run(debug=True)` is also set — debug mode is doubly enabled which is a security risk in any deployment.
+
+---
+
+## 🟠 High-Severity Bugs
+
+### 5. Wrong `.env` Filename in `config.py`
+**File:** [`config.py:7`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/extraction/config.py#L7)
+
+```python
+ENV_PATH = PROJECT_ROOT / "..env"   # BUG: double-dot prefix
+```
+
+**Impact:** This looks for a file literally named `..env` (with two dots), not the standard `.env`. The project has a `.env` file at root, but this path resolves to a different (non-existent) file. API keys won't load from the standard `.env`. The message in `admin_invoice_upload` even references `..env`:
+```python
+flash("API keys not loaded. Save ..env in the project root ...")
+```
+The RAG store (`store.py:13`) correctly loads `.env`, creating an inconsistency.
+
+---
+
+### 6. `admin_toggle_user` and `admin_delete_user` Use GET for State-Changing Operations
+**File:** [`vim_controller.py:168`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L168), [`vim_controller.py:187`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L187)
+
+```python
+@app.route('/admin/users/toggle/<int:user_id>')   # GET only
+@app.route('/admin/users/delete/<int:user_id>')   # GET only
+```
+
+**Impact:** These are state-changing operations exposed over GET. This violates HTTP semantics and is a **CSRF vulnerability** — a malicious link can delete/toggle any user just by getting the admin to visit a URL. Same issue exists for vendor toggle/delete routes.
+
+---
+
+### 7. Missing `db.session.rollback()` in `admin_edit_user`
+**File:** [`vim_controller.py:217-233`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L217)
+
+```python
+if request.method == 'POST':
+    user.Username = request.form['username']
+    ...
+    db.session.commit()  # no try/except, no rollback on failure
+```
+
+**Impact:** If `commit()` fails (e.g. unique constraint violation on email), the session is left in a dirty state. Same problem exists in `admin_edit_vendor`.
+
+---
+
+### 8. `VendorID` Stored as String in `admin_edit_user`
+**File:** [`vim_controller.py:222`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L222)
+
+```python
+user.VendorID = request.form['vendor_id']  # BUG: string, not int
+```
+
+**Impact:** Unlike `admin_add_user` which does `int(request.form['vendor_id'])`, the edit route stores a raw string into an Integer FK column. SQLite may silently accept this, but it will cause type errors in strict databases or comparison bugs.
+
+---
+
+### 9. `_groq_client` is a Stale Singleton in `enrich.py`
+**File:** [`enrich.py:14-22`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/extraction/enrich.py#L14)
+
+```python
+_groq_client = None
+
+def _get_groq_client():
+    global _groq_client
+    config.validate()
+    if _groq_client is None:
+        _groq_client = Groq(api_key=config.GROQ_API_KEY)
+    return _groq_client   # ← cached forever with the original key
+```
+
+**Impact:** If the API key changes at runtime (e.g. via the settings page or `.env` reload), the cached client keeps using the old key and all extractions fail with auth errors until the server restarts.
+
+---
+
+### 10. `TaxValidation` Uses Exact Float Equality
+**File:** [`stages.py:314`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/validation_setup/validation/stages.py#L314)
+
+```python
+if calculated_total != actual_total:   # exact float comparison
+```
+
+**Impact:** Although `round(..., 2)` is applied, floating-point arithmetic can still produce values like `100.00000000001` vs `100.0`. This can cause false-positive validation failures on perfectly valid invoices, especially when line items are summed.
+
+**Fix:** Use `abs(calculated_total - actual_total) > 0.01` tolerance check.
+
+---
+
+### 11. `DuplicateDetection` Uses a Relative File Path
+**File:** [`stages.py:464`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/validation_setup/validation/stages.py#L464)
+
+```python
+PROCESSED_INVOICES_FILE = "vim/validation_setup/data/processed_invoices.json"
+```
+
+**Impact:** This path is **relative to the current working directory** at runtime — which changes depending on how Flask is started. If the server is started from a different directory, this file is read/written to the wrong location or raises `FileNotFoundError` silently (caught and treated as empty history), causing incorrect duplicate detection.
+
+---
+
+## 🟡 Medium-Severity Bugs
+
+### 12. Unused Import in `vim_controller.py`
+**File:** [`vim_controller.py:1-4`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L1)
+
+```python
+from importlib.resources import files   # never used
+from flask import app, ...              # imports `app` from flask (wrong!)
+from yaml import load_all              # never used
+```
+
+- `from flask import app` — there is no `app` export from flask; this shadows the local `app` parameter in `register_routes(app)` and could cause `NameError` in certain call paths.
+- `load_all` from yaml is never used.
+- `files` from `importlib.resources` is never used.
+
+---
+
+### 13. `admin_invoice_extraction` Shadows Built-in `load_all`
+**File:** [`vim_controller.py:584`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L584)
+
+```python
+from vim.extraction.json_store import load_all, ENRICHED_PATH
+```
+
+This locally imports `load_all` within the route. Meanwhile, `from yaml import load_all` is imported at the top of the file. The local import shadows the top-level one — this works correctly but is confusing and fragile. The yaml `load_all` import at the top is completely dead code.
+
+---
+
+### 14. `get_collection()` is Cached with `@lru_cache` but May Become Stale
+**File:** [`store.py:30-39`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/rag/store.py#L30)
+
+```python
+@lru_cache(maxsize=1)
+def get_collection(name: str = CHROMA_COLLECTION_NAME) -> chromadb.Collection:
+```
+
+**Impact:** If `CHROMA_COLLECTION_NAME` changes at runtime or the ChromaDB client needs to be re-initialized, the cached collection object is never refreshed. Also, `lru_cache` is not thread-safe under heavy concurrent Flask requests (though threaded Flask calls with `threaded=True` can hit this).
+
+---
+
+### 15. `admin_settings` Stores API Keys in the Database in Plaintext
+**File:** [`vim_controller.py:478-485`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L478)
+
+```python
+config.OpenAIKey = request.form['openai_key']
+config.GeminiKey = request.form['gemini_key']
+```
+
+API keys saved via the settings UI are stored in the SQLite database in plaintext. These should at minimum not be stored in the DB, and if they must be, should be encrypted.
+
+---
+
+### 16. `insert_record` Does Not Flush Before `_upsert_ocr_extraction`
+**File:** [`load.py:136-171`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/extraction/load.py#L136)
+
+```python
+if existing_doc:
+    invoice = db.session.get(Invoice, existing_doc.InvoiceID)
+    ...
+    document = existing_doc
+else:
+    invoice = Invoice(**invoice_fields)
+    db.session.add(invoice)
+    db.session.flush()        # gets invoice.InvoiceID
+    document = InvoiceDocument(...)
+    db.session.add(document)
+    db.session.flush()        # gets document.DocumentID
+
+_upsert_ocr_extraction(document, record)   # accesses document.ocr_extraction
+```
+
+When `existing_doc` is found (update path), `document.ocr_extraction` may be a lazy-loaded relationship that hits the DB — but since the session hasn't been flushed after the `invoice_fields` update, there could be stale relationship data. Minor but can cause subtle bugs on re-uploads.
+
+---
+
+### 17. `POMatching` Stage Never Queries the Database
+**File:** [`stages.py:240-279`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/validation_setup/validation/stages.py#L240)
+
+```python
+purchase_orders = context.get("purchase_orders", {})
+po = purchase_orders.get(po_number)
+if not po:
+    return { "status": "FAILED", "message": "Purchase order not found" }
+```
+
+`run_validation.py` always passes `context={}` — so `purchase_orders` is always an empty dict. This means **every invoice will fail PO Matching**, even if a valid PO exists in the database. The stage should query `PurchaseOrder` from the DB instead of relying on context injection.
+
+---
+
+### 18. `ValidationResult.ValidationMessage` is Too Short
+**File:** [`models.py:286`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim_database/models.py#L286)
+
+```python
+ValidationMessage = db.Column(db.String(255))
+```
+
+Validation messages (especially from `stages.py` with `details` embedded) can easily exceed 255 characters. This will cause a database truncation error or silent data loss.
+
+---
+
+## 🔵 Low-Severity / Code Quality Issues
+
+### 19. `app.secret_key = os.urandom(16)` Regenerated on Every Restart
+**File:** [`app.py:19`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/app.py#L19)
+
+```python
+app.secret_key = os.urandom(16)
+```
+
+Every server restart invalidates all existing user sessions. This should be a fixed key stored in `.env`.
+
+---
+
+### 20. `datetime.utcnow()` is Deprecated in Python 3.12+
+**File:** [`models.py`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim_database/models.py) (multiple lines), [`dashboard/service.py:34`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/dashboard/service.py#L34)
+
+```python
+default=datetime.utcnow   # deprecated
+now = datetime.utcnow()   # deprecated
+```
+
+`datetime.utcnow()` is deprecated in Python 3.12 and will be removed in a future version. Use `datetime.now(timezone.utc)` instead.
+
+---
+
+### 21. No Input Validation on `page` / `page_size` Parameters
+**File:** [`vim_controller.py:858-859`](file:///d:/SPAR-NSR/AI%20Team/demo_280826/Vendor_Invoice_Management_POC/vim/vim_controller.py#L858)
+
+```python
+page      = max(1, int(request.args.get('page', 1)))
+page_size = min(500, max(1, int(request.args.get('page_size', 25))))
+```
+
+If a non-numeric string is passed for `page` or `page_size`, `int()` raises an unhandled `ValueError` resulting in a 500 error. Should be wrapped in a `try/except`.
+
+---
+
+## Summary Table
+
+| # | Severity | File | Issue |
+|---|----------|------|-------|
+| 1 | 🔴 Critical | `run_validation.py` | Hardcoded absolute path — breaks on all machines |
+| 2 | 🔴 Critical | `vim_controller.py` | Passwords stored/compared in plaintext |
+| 3 | 🔴 Critical | `vim_controller.py` | `admin_required` doesn't check authentication |
+| 4 | 🔴 Critical | `app.py` | Random `secret_key` + double debug mode |
+| 5 | 🟠 High | `config.py` | Wrong env file path (`..env` vs `.env`) |
+| 6 | 🟠 High | `vim_controller.py` | Destructive actions on GET (CSRF risk) |
+| 7 | 🟠 High | `vim_controller.py` | Missing rollback in edit routes |
+| 8 | 🟠 High | `vim_controller.py` | `VendorID` stored as string in edit user |
+| 9 | 🟠 High | `enrich.py` | Stale Groq client singleton |
+| 10 | 🟠 High | `stages.py` | Float equality in tax validation |
+| 11 | 🟠 High | `stages.py` | Relative path for duplicate detection file |
+| 12 | 🟡 Medium | `vim_controller.py` | Unused/wrong imports (`app` from flask) |
+| 13 | 🟡 Medium | `vim_controller.py` | `load_all` shadowed by yaml import |
+| 14 | 🟡 Medium | `store.py` | `lru_cache` on ChromaDB collection |
+| 15 | 🟡 Medium | `vim_controller.py` | API keys stored plaintext in DB |
+| 16 | 🟡 Medium | `load.py` | Potential stale relationship on re-upload |
+| 17 | 🟡 Medium | `stages.py` | `POMatching` always fails (empty context) |
+| 18 | 🟡 Medium | `models.py` | `ValidationMessage` column too short (255) |
+| 19 | 🔵 Low | `app.py` | `secret_key` regenerated on every restart |
+| 20 | 🔵 Low | `models.py`, `service.py` | `datetime.utcnow()` deprecated in Python 3.12 |
+| 21 | 🔵 Low | `vim_controller.py` | Unhandled `ValueError` on bad page params |

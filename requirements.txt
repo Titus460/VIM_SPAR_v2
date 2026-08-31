@@ -1,0 +1,17 @@
+flask
+flask-sqlalchemy
+python-dotenv
+groq
+llama-parse
+llama-index-core
+Pillow
+werkzeug
+markdown
+chromadb
+crewai
+crewai-tools
+sentence-transformers
+google-generativeai
+langchain-google-genai
+tenacity
+pypdf

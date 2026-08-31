@@ -1,0 +1,850 @@
+{% extends 'admin_base.html' %}
+
+{% block title %}
+Invoice Validation
+{% endblock %}
+
+{% block content %}
+
+<div class="container-fluid">
+
+    <!-- =====================================================
+         PAGE HEADER
+    ====================================================== -->
+
+    <div class="validation-header">
+
+        <div>
+            <h2>
+                ✔ Invoice Validation Results
+            </h2>
+
+            <p class="validation-subtitle">
+                Validation results for currently processed invoices
+            </p>
+        </div>
+
+        <!-- Refresh Button -->
+
+        <a
+            href="{{ url_for('admin_invoice_validation') }}"
+            class="refresh-button"
+        >
+            🔄 Refresh
+        </a>
+        
+        <a class="button" href="{{ url_for('admin_activities') }}">← Back to Admin Dashboard</a>
+
+    </div>
+
+
+    <!-- =====================================================
+         VALIDATION TABLE CARD
+    ====================================================== -->
+
+    <div class="validation-card">
+
+        {% if validation_results %}
+
+        <!-- =================================================
+             TABLE
+        ================================================== -->
+
+        <div class="table-responsive">
+
+            <table
+                class="table table-bordered table-hover"
+                id="validationTable"
+            >
+
+                <thead>
+
+                    <tr>
+
+                        <th>Invoice ID</th>
+
+                        <th>Invoice Number</th>
+
+                        <th>Validation Type</th>
+
+                        <th>Status</th>
+
+                        <th>Validation Message</th>
+
+                        <th>Validation Date</th>
+
+                    </tr>
+
+                </thead>
+
+
+                <tbody>
+
+                    {% for result in validation_results %}
+
+                    <tr>
+
+                        <td>
+                            {{ result.invoice_id or "-" }}
+                        </td>
+
+                        <td>
+                            {{ result.invoice_number or "—" }}
+                        </td>
+
+                        <td>
+                            {{ result.validation_type or "—" }}
+                        </td>
+
+                        <td>
+
+                            {% if result.status|string|upper == "PASSED" %}
+
+                                <span class="status-badge status-passed">
+                                    PASSED
+                                </span>
+
+                            {% elif result.status|string|upper == "FAILED" %}
+
+                                <span class="status-badge status-failed">
+                                    FAILED
+                                </span>
+
+                            {% else %}
+
+                                <span class="status-badge status-other">
+                                    {{ result.status or "—" }}
+                                </span>
+
+                            {% endif %}
+
+                        </td>
+
+                        <td class="message-column">
+
+                            {{ result.message or "—" }}
+
+                        </td>
+
+                        <td>
+
+                            {% if result.validation_date %}
+
+                                {{ result.validation_date }}
+
+                            {% else %}
+
+                                —
+
+                            {% endif %}
+
+                        </td>
+
+                    </tr>
+
+                    {% endfor %}
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+
+        <!-- =================================================
+             PAGINATION
+        ================================================== -->
+
+        <div
+            class="pagination-container"
+            id="paginationContainer"
+        >
+
+            <button
+                id="previousButton"
+                class="pagination-button"
+                onclick="previousPage()"
+            >
+                Previous
+            </button>
+
+            <div id="pageNumbers"></div>
+
+            <button
+                id="nextButton"
+                class="pagination-button"
+                onclick="nextPage()"
+            >
+                Next
+            </button>
+
+        </div>
+
+
+        <!-- =================================================
+             ROW INFORMATION
+        ================================================== -->
+
+        <div
+            class="row-information"
+            id="rowInformation"
+        >
+        </div>
+
+
+        {% else %}
+
+        <!-- =================================================
+             EMPTY STATE
+        ================================================== -->
+
+        <div class="empty-validation">
+
+            <div class="empty-icon">
+                📋
+            </div>
+
+            <h4>
+                No Validation Results
+            </h4>
+
+            <p>
+                No invoices are currently available for validation.
+            </p>
+
+            <p class="empty-subtext">
+                Upload an invoice from the Invoice Upload section
+                and run validation to see the results here.
+            </p>
+
+            <a
+                href="{{ url_for('admin_invoice_upload') }}"
+                class="upload-button"
+            >
+                📄 Go to Invoice Upload
+            </a>
+
+        </div>
+
+        {% endif %}
+
+    </div>
+
+</div>
+
+
+<!-- =========================================================
+     STYLES
+========================================================= -->
+
+<style>
+
+    /* -------------------------------------------------------
+       PAGE HEADER
+    ------------------------------------------------------- */
+
+    .validation-header {
+
+        display: flex;
+
+        justify-content: space-between;
+
+        align-items: center;
+
+        margin-bottom: 25px;
+
+    }
+
+
+    .validation-header h2 {
+
+        margin: 0;
+
+        color: #090f22;
+
+    }
+
+
+    .validation-subtitle {
+
+        margin-top: 8px;
+
+        color: #666;
+
+        font-size: 14px;
+
+    }
+
+
+    /* -------------------------------------------------------
+       REFRESH BUTTON
+    ------------------------------------------------------- */
+
+    .refresh-button {
+
+        display: inline-block;
+
+        background: #0077b6;
+
+        color: white;
+
+        padding: 10px 20px;
+
+        border-radius: 8px;
+
+        text-decoration: none;
+
+        font-weight: 600;
+
+        transition: 0.3s;
+
+    }
+
+
+    .refresh-button:hover {
+
+        background: #023e8a;
+
+        color: white;
+
+        text-decoration: none;
+
+    }
+
+
+    /* -------------------------------------------------------
+       TABLE CARD
+    ------------------------------------------------------- */
+
+    .validation-card {
+
+        background: white;
+
+        border-radius: 12px;
+
+        padding: 25px;
+
+        box-shadow: 0 4px 12px rgba(0,0,0,0.10);
+
+    }
+
+
+    /* -------------------------------------------------------
+       TABLE
+    ------------------------------------------------------- */
+
+    #validationTable {
+
+        width: 100%;
+
+        margin-bottom: 0;
+
+        table-layout: auto;
+
+    }
+
+
+    #validationTable thead th {
+
+        background: #212529;
+
+        color: white;
+
+        text-align: center;
+
+        vertical-align: middle;
+
+        white-space: nowrap;
+
+        padding: 12px 10px;
+
+    }
+
+
+    #validationTable tbody td {
+
+        text-align: center;
+
+        vertical-align: middle;
+
+        padding: 10px;
+
+    }
+
+
+    .message-column {
+
+        min-width: 300px;
+
+        max-width: 500px;
+
+        white-space: normal;
+
+    }
+
+
+    /* -------------------------------------------------------
+       STATUS BADGES
+    ------------------------------------------------------- */
+
+    .status-badge {
+
+        display: inline-block;
+
+        padding: 4px 9px;
+
+        border-radius: 5px;
+
+        font-size: 12px;
+
+        font-weight: bold;
+
+        color: white;
+
+    }
+
+
+    .status-passed {
+
+        background: #198754;
+
+    }
+
+
+    .status-failed {
+
+        background: #dc3545;
+
+    }
+
+
+    .status-other {
+
+        background: #6c757d;
+
+    }
+
+
+    /* -------------------------------------------------------
+       PAGINATION
+    ------------------------------------------------------- */
+
+    .pagination-container {
+
+        display: flex;
+
+        justify-content: center;
+
+        align-items: center;
+
+        gap: 6px;
+
+        margin-top: 25px;
+
+        flex-wrap: wrap;
+
+    }
+
+
+    #pageNumbers {
+
+        display: flex;
+
+        gap: 5px;
+
+    }
+
+
+    .pagination-button {
+
+        border: 1px solid #0077b6;
+
+        background: white;
+
+        color: #0077b6;
+
+        padding: 7px 12px;
+
+        border-radius: 5px;
+
+        cursor: pointer;
+
+        font-size: 14px;
+
+    }
+
+
+    .pagination-button:hover {
+
+        background: #0077b6;
+
+        color: white;
+
+    }
+
+
+    .pagination-button:disabled {
+
+        background: #e9ecef;
+
+        color: #999;
+
+        border-color: #ddd;
+
+        cursor: not-allowed;
+
+    }
+
+
+    .page-number {
+
+        border: 1px solid #0077b6;
+
+        background: white;
+
+        color: #0077b6;
+
+        padding: 7px 11px;
+
+        border-radius: 5px;
+
+        cursor: pointer;
+
+        font-size: 14px;
+
+    }
+
+
+    .page-number:hover {
+
+        background: #0077b6;
+
+        color: white;
+
+    }
+
+
+    .page-number.active {
+
+        background: #0077b6;
+
+        color: white;
+
+    }
+
+
+    /* -------------------------------------------------------
+       ROW INFORMATION
+    ------------------------------------------------------- */
+
+    .row-information {
+
+        text-align: center;
+
+        margin-top: 12px;
+
+        color: #666;
+
+        font-size: 14px;
+
+    }
+
+
+    /* -------------------------------------------------------
+       EMPTY STATE
+    ------------------------------------------------------- */
+
+    .empty-validation {
+
+        text-align: center;
+
+        padding: 70px 20px;
+
+    }
+
+
+    .empty-icon {
+
+        font-size: 50px;
+
+        margin-bottom: 15px;
+
+    }
+
+
+    .empty-validation h4 {
+
+        color: #333;
+
+        margin-bottom: 10px;
+
+    }
+
+
+    .empty-validation p {
+
+        color: #666;
+
+        margin-bottom: 5px;
+
+    }
+
+
+    .empty-subtext {
+
+        font-size: 14px;
+
+        margin-bottom: 25px !important;
+
+    }
+
+
+    .upload-button {
+
+        display: inline-block;
+
+        background: #0077b6;
+
+        color: white;
+
+        padding: 10px 18px;
+
+        border-radius: 7px;
+
+        text-decoration: none;
+
+        margin-top: 10px;
+
+    }
+
+
+    .upload-button:hover {
+
+        background: #023e8a;
+
+        color: white;
+
+        text-decoration: none;
+
+    }
+
+
+    /* -------------------------------------------------------
+       RESPONSIVE
+    ------------------------------------------------------- */
+
+    @media (max-width: 768px) {
+
+        .validation-header {
+
+            flex-direction: column;
+
+            align-items: flex-start;
+
+            gap: 15px;
+
+        }
+
+        .refresh-button {
+
+            width: 100%;
+
+            text-align: center;
+
+        }
+
+    }
+
+</style>
+
+
+<!-- =========================================================
+     PAGINATION JAVASCRIPT
+========================================================= -->
+
+{% if validation_results %}
+
+<script>
+
+    const rowsPerPage = 10;
+
+    let currentPage = 1;
+
+    const table = document.getElementById("validationTable");
+
+    const tbody = table.querySelector("tbody");
+
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+
+    const totalRows = rows.length;
+
+    const totalPages = Math.ceil(
+        totalRows / rowsPerPage
+    );
+
+
+    function displayPage(page) {
+
+        currentPage = page;
+
+        const start = (page - 1) * rowsPerPage;
+
+        const end = start + rowsPerPage;
+
+
+        // Hide all rows first
+
+        rows.forEach(function(row, index) {
+
+            if (
+                index >= start &&
+                index < end
+            ) {
+
+                row.style.display = "";
+
+            } else {
+
+                row.style.display = "none";
+
+            }
+
+        });
+
+
+        // Update Previous button
+
+        const previousButton =
+            document.getElementById(
+                "previousButton"
+            );
+
+        previousButton.disabled =
+            currentPage === 1;
+
+
+        // Update Next button
+
+        const nextButton =
+            document.getElementById(
+                "nextButton"
+            );
+
+        nextButton.disabled =
+            currentPage === totalPages;
+
+
+        // Generate page numbers
+
+        const pageNumbers =
+            document.getElementById(
+                "pageNumbers"
+            );
+
+        pageNumbers.innerHTML = "";
+
+
+        for (
+            let i = 1;
+            i <= totalPages;
+            i++
+        ) {
+
+            const button =
+                document.createElement("button");
+
+            button.innerText = i;
+
+            button.className =
+                "page-number";
+
+
+            if (i === currentPage) {
+
+                button.classList.add("active");
+
+            }
+
+
+            button.onclick = function() {
+
+                displayPage(i);
+
+            };
+
+
+            pageNumbers.appendChild(button);
+
+        }
+
+
+        // Update row information
+
+        const information =
+            document.getElementById(
+                "rowInformation"
+            );
+
+
+        const showingStart =
+            totalRows === 0
+                ? 0
+                : start + 1;
+
+
+        const showingEnd =
+            Math.min(
+                end,
+                totalRows
+            );
+
+
+        information.innerText =
+            "Showing " +
+            showingStart +
+            " - " +
+            showingEnd +
+            " of " +
+            totalRows +
+            " validation results";
+
+    }
+
+
+    function previousPage() {
+
+        if (currentPage > 1) {
+
+            displayPage(
+                currentPage - 1
+            );
+
+        }
+
+    }
+
+
+    function nextPage() {
+
+        if (currentPage < totalPages) {
+
+            displayPage(
+                currentPage + 1
+            );
+
+        }
+
+    }
+
+
+    // -------------------------------------------------------
+    // Load first page
+    // -------------------------------------------------------
+
+    displayPage(1);
+
+</script>
+
+{% endif %}
+
+{% endblock %}
