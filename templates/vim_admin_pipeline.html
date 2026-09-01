@@ -1,0 +1,342 @@
+{% extends 'admin_base.html' %}
+
+{% block title %}Invoice Pipeline Monitor{% endblock %}
+
+{% block content %}
+<style>
+  /* ── Google Font ── */
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  .pm-root { font-family: 'Inter', 'Segoe UI', sans-serif; background: #f4f7fb; min-height: 80vh; padding: 32px 24px 60px; }
+
+  /* ── Page header ── */
+  .pm-page-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 30px; }
+  .pm-page-header h1 { margin: 0; font-size: 1.55rem; font-weight: 700; color: #0d1b3e; }
+  .pm-page-header p  { margin: 2px 0 0; font-size: 0.88rem; color: #6b7280; }
+  .pm-back-btn { text-decoration: none; background: white; border: 1px solid #d1d5db; color: #374151; border-radius: 8px; padding: 8px 16px; font-size: 0.85rem; font-weight: 500; transition: all 0.2s; }
+  .pm-back-btn:hover { background: #023e8a; color: white; border-color: #023e8a; }
+
+  /* ── Summary bar ── */
+  .pm-stats { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 28px; }
+  .pm-stat  { background: white; border-radius: 12px; padding: 14px 20px; flex: 1; min-width: 130px; box-shadow: 0 1px 4px rgba(0,0,0,0.07); border-top: 3px solid #e5e7eb; text-align: center; transition: transform 0.2s; }
+  .pm-stat:hover { transform: translateY(-2px); }
+  .pm-stat-n { font-size: 2rem; font-weight: 700; line-height: 1; }
+  .pm-stat-l { font-size: 0.78rem; color: #6b7280; margin-top: 4px; }
+  .pm-stat.total   { border-top-color: #6366f1; } .pm-stat.total   .pm-stat-n { color: #4f46e5; }
+  .pm-stat.all-ok  { border-top-color: #22c55e; } .pm-stat.all-ok  .pm-stat-n { color: #16a34a; }
+  .pm-stat.issues  { border-top-color: #f59e0b; } .pm-stat.issues  .pm-stat-n { color: #d97706; }
+  .pm-stat.inprog  { border-top-color: #3b82f6; } .pm-stat.inprog  .pm-stat-n { color: #2563eb; }
+
+  /* ── Search / filter bar ── */
+  .pm-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 22px; align-items: center; }
+  .pm-search  { flex: 1; min-width: 220px; background: white; border: 1px solid #d1d5db; border-radius: 9px; padding: 10px 14px 10px 38px; font-size: 0.9rem; color: #111827; outline: none; transition: border-color 0.2s; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.868-3.834zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: 12px center; }
+  .pm-search:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+  .pm-filter { padding: 9px 16px; border-radius: 9px; border: 1px solid #d1d5db; background: white; font-size: 0.84rem; font-weight: 500; color: #374151; cursor: pointer; transition: all 0.18s; }
+  .pm-filter.active, .pm-filter:hover { background: #4f46e5; color: white; border-color: #4f46e5; }
+  .pm-refresh { padding: 9px 16px; border-radius: 9px; border: 1px solid #d1d5db; background: white; font-size: 0.84rem; font-weight: 500; color: #374151; cursor: pointer; transition: all 0.18s; }
+  .pm-refresh:hover { background: #f3f4f6; }
+
+  /* ── Invoice card ── */
+  .pm-cards { display: flex; flex-direction: column; gap: 18px; }
+  .pm-card  { background: white; border-radius: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.07); overflow: hidden; transition: box-shadow 0.2s; }
+  .pm-card:hover { box-shadow: 0 6px 20px rgba(0,0,0,0.11); }
+
+  /* Card top bar (coloured by status) */
+  .pm-card-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px; border-bottom: 1px solid #f0f0f0; flex-wrap: wrap; gap: 10px; }
+  .pm-card-header.ok      { border-left: 5px solid #22c55e; }
+  .pm-card-header.issues  { border-left: 5px solid #f59e0b; }
+  .pm-card-header.inprog  { border-left: 5px solid #3b82f6; }
+  .pm-card-header.error   { border-left: 5px solid #ef4444; }
+
+  .pm-inv-meta { display: flex; flex-direction: column; }
+  .pm-inv-num  { font-size: 1.05rem; font-weight: 700; color: #111827; }
+  .pm-inv-sub  { font-size: 0.8rem; color: #6b7280; margin-top: 2px; }
+  .pm-inv-sub strong { color: #374151; }
+
+  /* Status pill */
+  .pm-pill { padding: 5px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; white-space: nowrap; }
+  .pm-pill.ok     { background: #dcfce7; color: #166534; }
+  .pm-pill.issues { background: #fef3c7; color: #92400e; }
+  .pm-pill.inprog { background: #dbeafe; color: #1e40af; }
+  .pm-pill.error  { background: #fee2e2; color: #991b1b; }
+
+  /* Card body — 3-stage pipeline + checks */
+  .pm-card-body { padding: 18px 22px 20px; }
+
+  /* 3-step visual pipeline */
+  .pm-pipeline { display: flex; align-items: flex-start; margin-bottom: 20px; }
+  .pm-pstep { flex: 1; display: flex; flex-direction: column; align-items: center; position: relative; }
+  .pm-pstep:not(:last-child)::after {
+    content: ''; position: absolute; top: 14px; left: 50%; width: 100%; height: 2px;
+    background: #e5e7eb; z-index: 0;
+  }
+  .pm-pstep.done::after    { background: #22c55e; }
+  .pm-pstep.inprog::after  { background: linear-gradient(to right, #3b82f6 50%, #e5e7eb 50%); }
+
+  .pm-pnode {
+    width: 30px; height: 30px; border-radius: 50%; z-index: 1; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.85rem; font-weight: 700; border: 2px solid #e5e7eb; background: white;
+    color: #9ca3af;
+  }
+  .pm-pstep.done    .pm-pnode { background: #22c55e; border-color: #22c55e; color: white; }
+  .pm-pstep.issues  .pm-pnode { background: #f59e0b; border-color: #f59e0b; color: white; }
+  .pm-pstep.inprog  .pm-pnode { background: #3b82f6; border-color: #3b82f6; color: white; animation: pulse-blue 1.4s ease-in-out infinite; }
+  .pm-pstep.waiting .pm-pnode { background: #f3f4f6; border-color: #d1d5db; color: #9ca3af; }
+
+  @keyframes pulse-blue {
+    0%,100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.35); }
+    50%      { box-shadow: 0 0 0 8px rgba(59,130,246,0); }
+  }
+
+  .pm-pstep-label { margin-top: 6px; font-size: 0.72rem; font-weight: 600; color: #6b7280; text-align: center; }
+  .pm-pstep.done    .pm-pstep-label { color: #16a34a; }
+  .pm-pstep.issues  .pm-pstep-label { color: #d97706; }
+  .pm-pstep.inprog  .pm-pstep-label { color: #2563eb; }
+
+  /* "What's happening" banner */
+  .pm-status-msg { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 14px; font-size: 0.85rem; color: #374151; margin-bottom: 16px; display: flex; align-items: flex-start; gap: 8px; }
+  .pm-status-msg.ok     { background: #f0fdf4; border-color: #bbf7d0; }
+  .pm-status-msg.issues { background: #fffbeb; border-color: #fde68a; }
+  .pm-status-msg.error  { background: #fff1f2; border-color: #fecaca; }
+
+  /* Checks grid */
+  .pm-checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .pm-check  { border-radius: 10px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 10px; font-size: 0.82rem; }
+  .pm-check.passed { background: #f0fdf4; }
+  .pm-check.failed { background: #fff7ed; border: 1px solid #fde68a; }
+  .pm-check.waiting { background: #f9fafb; }
+
+  .pm-check-icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+  .pm-check-body { display: flex; flex-direction: column; }
+  .pm-check-name { font-weight: 600; color: #111827; }
+  .pm-check.passed .pm-check-name { color: #166534; }
+  .pm-check.failed .pm-check-name { color: #92400e; }
+  .pm-check.waiting .pm-check-name { color: #9ca3af; }
+  .pm-check-result { font-size: 0.75rem; color: #6b7280; margin-top: 2px; }
+  .pm-check.passed .pm-check-result { color: #16a34a; }
+  .pm-check.failed .pm-check-result { color: #b45309; }
+
+  /* Toggle detail link */
+  .pm-toggle { font-size: 0.78rem; color: #6366f1; cursor: pointer; margin-top: 14px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; background: none; border: none; padding: 0; font-family: inherit; }
+  .pm-toggle:hover { color: #4338ca; text-decoration: underline; }
+  .pm-detail { display: none; margin-top: 10px; }
+  .pm-detail.open { display: block; }
+
+  /* Timeline */
+  .pm-timeline { list-style: none; margin: 0; padding: 0; }
+  .pm-tl-item { display: flex; gap: 10px; padding: 5px 0; font-size: 0.78rem; color: #374151; }
+  .pm-tl-ts   { color: #9ca3af; white-space: nowrap; min-width: 130px; }
+
+  /* Empty state */
+  .pm-empty { text-align: center; padding: 80px 20px; color: #9ca3af; }
+  .pm-empty-icon { font-size: 4rem; margin-bottom: 12px; }
+  .pm-empty h3 { font-size: 1.1rem; color: #6b7280; margin: 0 0 6px; }
+  .pm-empty p  { font-size: 0.88rem; }
+
+  /* Timestamp chip */
+  .pm-ts-chip { font-size: 0.74rem; color: #9ca3af; }
+</style>
+
+<div class="pm-root">
+
+  <!-- Page Header -->
+  <div class="pm-page-header">
+    <div>
+      <h1>&#128260; Invoice Pipeline Monitor</h1>
+      <p>Track every invoice from the moment it's uploaded to final approval — in real time.</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span class="pm-ts-chip" id="last-updated">Updated just now</span>
+      <button class="pm-refresh" onclick="window.location.reload()" title="Refresh">&#8635; Refresh</button>
+      <a class="pm-back-btn" href="{{ url_for('admin_activities') }}">&#8592; Dashboard</a>
+    </div>
+  </div>
+
+  <!-- Summary Stats -->
+  {% set total_ct  = pipeline_rows | length %}
+  {% set ok_ct     = pipeline_rows | selectattr('overall', 'equalto', 'passed')    | list | length %}
+  {% set issues_ct = pipeline_rows | selectattr('overall', 'equalto', 'issues')    | list | length %}
+  {% set inprog_ct = pipeline_rows | selectattr('overall', 'equalto', 'in_progress') | list | length %}
+
+  <div class="pm-stats">
+    <div class="pm-stat total"><div class="pm-stat-n">{{ total_ct }}</div><div class="pm-stat-l">Total Invoices</div></div>
+    <div class="pm-stat all-ok"><div class="pm-stat-n">{{ ok_ct }}</div><div class="pm-stat-l">&#10004; All Checks Passed</div></div>
+    <div class="pm-stat issues"><div class="pm-stat-n">{{ issues_ct }}</div><div class="pm-stat-l">&#9888; Issues Found</div></div>
+    <div class="pm-stat inprog"><div class="pm-stat-n">{{ inprog_ct }}</div><div class="pm-stat-l">&#9200; In Progress</div></div>
+  </div>
+
+  <!-- Search & Filter -->
+  <div class="pm-toolbar">
+    <input class="pm-search" id="pm-search" type="text" placeholder="Search invoice number or vendor…" oninput="filterCards()">
+    <button class="pm-filter active" id="f-all"     onclick="setFilter('all',      this)">All</button>
+    <button class="pm-filter"        id="f-passed"  onclick="setFilter('passed',   this)">&#10004; Passed</button>
+    <button class="pm-filter"        id="f-issues"  onclick="setFilter('issues',   this)">&#9888; Issues</button>
+    <button class="pm-filter"        id="f-inprog"  onclick="setFilter('in_progress', this)">&#9200; In Progress</button>
+  </div>
+
+  <!-- Invoice Cards -->
+  {% if pipeline_rows %}
+  <div class="pm-cards" id="pm-cards">
+
+    {% for row in pipeline_rows %}
+    {% set css = 'ok' if row.overall == 'passed' else ('issues' if row.overall == 'issues' else ('error' if row.overall == 'error' else 'inprog')) %}
+    <div class="pm-card"
+         data-overall="{{ row.overall }}"
+         data-search="{{ row.invoice_number | lower }} {{ row.vendor | lower }} {{ row.filename | lower }}">
+
+      <!-- Card header -->
+      <div class="pm-card-header {{ css }}">
+        <div class="pm-inv-meta">
+          <span class="pm-inv-num">
+            &#128196;
+            {% if row.invoice_number %}
+              Invoice #{{ row.invoice_number }}
+            {% else %}
+              {{ row.filename }}
+            {% endif %}
+          </span>
+          <span class="pm-inv-sub">
+            {% if row.vendor %}<strong>{{ row.vendor }}</strong>{% endif %}
+            {% if row.amount and row.amount != '0.0' %}
+              &nbsp;·&nbsp; USD {{ "%.2f" | format(row.amount | float) }}
+            {% endif %}
+            {% if row.started_at %}
+              &nbsp;·&nbsp; Submitted {{ row.started_at }}
+            {% endif %}
+          </span>
+        </div>
+        <span class="pm-pill {{ css }}">
+          {% if css == 'ok' %}&#10004; {{ row.overall_label }}
+          {% elif css == 'issues' %}&#9888; {{ row.overall_label }}
+          {% elif css == 'error' %}&#10006; {{ row.overall_label }}
+          {% else %}&#9200; {{ row.overall_label }}{% endif %}
+        </span>
+      </div>
+
+      <!-- Card body -->
+      <div class="pm-card-body">
+
+        <!-- 3-step visual pipeline -->
+        {% set upload_css  = 'done' if row.stage_upload == 'done' else ('inprog' if row.stage_upload == 'in_progress' else 'waiting') %}
+        {% set extract_css = 'done' if row.stage_extract == 'done' else ('inprog' if row.stage_extract == 'in_progress' else 'waiting') %}
+        {% set val_css     = 'done' if row.stage_validate == 'done' else ('issues' if row.stage_validate == 'issues' else ('inprog' if row.stage_validate == 'in_progress' else 'waiting')) %}
+
+        <div class="pm-pipeline">
+          <div class="pm-pstep {{ upload_css }}">
+            <div class="pm-pnode">{% if upload_css == 'done' %}&#10003;{% elif upload_css == 'inprog' %}&#9679;{% else %}1{% endif %}</div>
+            <span class="pm-pstep-label">&#128228; Received</span>
+          </div>
+          <div class="pm-pstep {{ extract_css }}">
+            <div class="pm-pnode">{% if extract_css == 'done' %}&#10003;{% elif extract_css == 'inprog' %}&#9679;{% else %}2{% endif %}</div>
+            <span class="pm-pstep-label">&#128202; Reading Data</span>
+          </div>
+          <div class="pm-pstep {{ val_css }}">
+            <div class="pm-pnode">{% if val_css == 'done' or val_css == 'issues' %}{% if val_css == 'done' %}&#10003;{% else %}&#9888;{% endif %}{% elif val_css == 'inprog' %}&#9679;{% else %}3{% endif %}</div>
+            <span class="pm-pstep-label">&#128270; Checking</span>
+          </div>
+        </div>
+
+        <!-- Plain-English status message -->
+        <div class="pm-status-msg {{ css }}">
+          <span>
+            {% if css == 'ok' %}&#9989;
+            {% elif css == 'issues' %}&#9888;&#65039;
+            {% elif css == 'error' %}&#10060;
+            {% else %}&#9203;{% endif %}
+          </span>
+          <span>{{ row.current_step_msg }}</span>
+        </div>
+
+        <!-- Validation checks (only if available) -->
+        {% if row.checks %}
+        <div class="pm-checks">
+          {% for chk in row.checks %}
+          {% set chk_css = 'passed' if chk.status == 'PASSED' else 'failed' %}
+          <div class="pm-check {{ chk_css }}">
+            <span class="pm-check-icon">{{ chk.icon }}</span>
+            <div class="pm-check-body">
+              <span class="pm-check-name">{{ chk.label }}</span>
+              <span class="pm-check-result">
+                {% if chk.status == 'PASSED' %}
+                  &#10004; Looks good
+                {% else %}
+                  &#9888; {{ chk.reason }}
+                {% endif %}
+              </span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+
+        <!-- Toggle raw timeline -->
+        <button class="pm-toggle" onclick="toggleDetail(this)">&#128196; Show processing timeline</button>
+        <div class="pm-detail">
+          <ul class="pm-timeline">
+            {% if row.started_at %}<li class="pm-tl-item"><span class="pm-tl-ts">{{ row.started_at }}</span><span>Invoice received and queued for processing</span></li>{% endif %}
+            {% if row.stage_upload == 'done' %}<li class="pm-tl-item"><span class="pm-tl-ts">{{ row.started_at }}</span><span>&#128228; Document uploaded successfully</span></li>{% endif %}
+            {% if row.vendor %}<li class="pm-tl-item"><span class="pm-tl-ts">{{ row.started_at }}</span><span>&#128203; Vendor identified: {{ row.vendor }}</span></li>{% endif %}
+            {% if row.invoice_number %}<li class="pm-tl-item"><span class="pm-tl-ts">{{ row.started_at }}</span><span>&#128202; Invoice data extracted — Invoice #{{ row.invoice_number }}{% if row.amount %}, Amount: USD {{ "%.2f" | format(row.amount | float) }}{% endif %}</span></li>{% endif %}
+            {% for chk in row.checks %}
+            <li class="pm-tl-item">
+              <span class="pm-tl-ts">{{ row.started_at }}</span>
+              <span>{% if chk.status == 'PASSED' %}&#10004;{% else %}&#9888;{% endif %} {{ chk.label }}: {{ chk.status }}{% if chk.reason %} — {{ chk.reason }}{% endif %}</span>
+            </li>
+            {% endfor %}
+            {% if row.finished_at %}<li class="pm-tl-item"><span class="pm-tl-ts">{{ row.finished_at }}</span><span>&#127937; Processing completed</span></li>{% endif %}
+          </ul>
+        </div>
+        {% endif %}
+
+      </div>
+    </div>
+    {% endfor %}
+
+  </div>
+  {% else %}
+  <div class="pm-empty">
+    <div class="pm-empty-icon">&#128460;</div>
+    <h3>No invoices in the pipeline yet</h3>
+    <p>Once an invoice is uploaded it will appear here automatically.</p>
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+  let activeFilter = 'all';
+
+  function setFilter(f, btn) {
+    activeFilter = f;
+    document.querySelectorAll('.pm-filter').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    applyFilters();
+  }
+
+  function filterCards() { applyFilters(); }
+
+  function applyFilters() {
+    const q     = document.getElementById('pm-search').value.toLowerCase().trim();
+    const cards = document.querySelectorAll('#pm-cards .pm-card');
+    cards.forEach(card => {
+      const matchF = activeFilter === 'all' || card.dataset.overall === activeFilter;
+      const matchQ = !q || (card.dataset.search || '').includes(q);
+      card.style.display = (matchF && matchQ) ? '' : 'none';
+    });
+  }
+
+  function toggleDetail(btn) {
+    const detail = btn.nextElementSibling;
+    const open   = detail.classList.toggle('open');
+    btn.textContent = open ? '&#128196; Hide timeline' : '&#128196; Show processing timeline';
+    btn.innerHTML = open
+      ? '&#128196; Hide processing timeline'
+      : '&#128196; Show processing timeline';
+  }
+
+  // Show last-updated time
+  const now = new Date();
+  document.getElementById('last-updated').textContent =
+    'Updated ' + now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+</script>
+{% endblock %}

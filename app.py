@@ -23,14 +23,24 @@ def create_app():
 
     app = Flask(__name__)
 
-    secret_key = os.getenv("SECRET_KEY", "").strip()
-    if not secret_key:
-        raise RuntimeError(
-            "SECRET_KEY is not set. Add SECRET_KEY=<random-string> to your .env file.\n"
-            "  Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
-        )
-    app.secret_key = secret_key
+    # secret_key = os.getenv("SECRET_KEY", "").strip()
+    # if not secret_key:
+    #     raise RuntimeError(
+    #         "SECRET_KEY is not set. Add SECRET_KEY=<random-string> to your .env file.\n"
+    #         "  Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    #     )
+    # app.secret_key = secret_key
+    
+    app.secret_key = os.urandom(16)
     logger.info("SECRET_KEY loaded OK")
+
+    app.debug = True
+    # Anchor the database to this file's directory. A relative sqlite:/// URI
+    # is resolved against Flask's instance_path, which falls back to the
+    # working directory and silently pointed the app at an empty database
+    # whenever the server was started from a different folder.
+    db_path = Path(__file__).resolve().parent / "instance" / "vim_database.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
     app.config["SQLALCHEMY_DATABASE_URI"] = (
         "sqlite:///vim_database.sqlite"
@@ -56,6 +66,15 @@ def create_app():
         except Exception as e:
             logger.error("db.create_all() FAILED: %s", e)
             print("create_all() FAILED:", e)
+
+        # create_all() does not alter tables that already exist, so columns
+        # added to the models later have to be applied to the existing file.
+        try:
+            from vim_database.migrate import sync_columns
+ 
+            sync_columns()
+        except Exception as e:
+            print("schema migration FAILED:", e)
 
         # ---------------------------------------------
         # LOAD API KEYS

@@ -1,46 +1,104 @@
 """Orchestrates upload → extract → persist for the VIM web app."""
-
+ 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
-
+ 
 from werkzeug.utils import secure_filename
-
+ 
 from vim.extraction import config
-from vim.extraction.enrich import detect_vendor_name, extract_from_file
+from vim.extraction.classifier import classify_document, classify_image
+from vim.extraction.enrich import extract_from_file, load_document_text
 from vim.extraction.load import insert_record
 from vim.extraction.schema import empty_record
-from vim.extraction.vendors import find_registered_vendor
+from vim.extraction.vendors import find_or_create_vendor
 from vim_database.database import db
-from vim_logger import get_logger
-
-logger = get_logger("vim.extraction.service")
-
-
+ 
+ 
+# SQLite permits a single writer, so parallel uploads take turns for the
+# persist step rather than racing and failing with "database is locked".
+_db_write_lock = threading.Lock()
+ 
+ 
 def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in config.SUPPORTED_EXTENSIONS
-
-
+ 
+ 
 def save_upload(file_storage) -> Path:
     """Save an uploaded file and return its path."""
     original = secure_filename(file_storage.filename or "")
     if not original:
         raise ValueError("No filename provided")
-
+ 
     ext = Path(original).suffix.lower()
     if ext not in config.SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {ext}")
-
+ 
     config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = config.UPLOAD_DIR / f"{uuid4().hex}_{original}"
     file_storage.save(dest)
-    logger.info("[UPLOAD] Saved '%s' → %s", original, dest)
     return dest
-
-
+ 
+ 
+def resolve_pending_upload(stored_file_name: str) -> Path | None:
+    """
+    Map a stored upload name back to its path on disk.
+ 
+    Only names that resolve to an existing file directly inside UPLOAD_DIR are
+    accepted, so a crafted value cannot reach elsewhere on the filesystem.
+    """
+    name = Path(stored_file_name or "").name
+    if not name:
+        return None
+ 
+    upload_dir = config.UPLOAD_DIR.resolve()
+    candidate = (upload_dir / name).resolve()
+    if candidate.parent != upload_dir or not candidate.is_file():
+        return None
+    return candidate
+ 
+ 
+def discard_pending_upload(
+    stored_file_name: str,
+    original_name: str = "",
+    user_id=None,
+) -> bool:
+    """
+    Decline a held upload: keep the file and a rejected_document row for
+    later review, but drop it from enriched.json so it is not treated as live.
+    """
+    from vim.extraction.json_store import delete_record
+    from vim.extraction.rejections import DECISION_STOPPED, mark_decision
+ 
+    mark_decision(stored_file_name, DECISION_STOPPED, user_id=user_id)
+    delete_record(
+        original_name or stored_file_name,
+        stored_file_name=stored_file_name,
+    )
+    return True
+ 
+ 
+def _hold_as_rejected(record: dict, reason: str) -> dict:
+    """Write enriched.json and a rejected_document row, then return the record."""
+    from vim.extraction.json_store import upsert_record
+    from vim.extraction.rejections import record_rejection
+ 
+    upsert_record(record)
+    try:
+        record_rejection(record, reason=reason)
+    except Exception as e:
+        print("Could not store rejected document:", e)
+    return record
+ 
+ 
 def _resolve_status(record: dict) -> str:
     """Derive pipeline status from extraction/validation outcome."""
     if record.get("status") == "vendor_not_registered":
         return "vendor_not_registered"
+    if record.get("status") == "not_invoice":
+        return "not_invoice"
     if record.get("_extraction_error"):
         return "extraction_failed"
     if record.get("_db_error") or record.get("status") == "db_error":
@@ -48,8 +106,8 @@ def _resolve_status(record: dict) -> str:
     if record.get("_validation_issues"):
         return "needs_review"
     return "success"
-
-
+ 
+ 
 def _vendor_gate_failure(
     *,
     original_name: str,
@@ -65,138 +123,259 @@ def _vendor_gate_failure(
     record["_extraction_error"] = message
     record["status"] = "vendor_not_registered"
     return record
-
-
+ 
+ 
+def _not_invoice_result(
+    *,
+    original_name: str,
+    saved_path: Path,
+    raw_text: str,
+    verdict: dict,
+) -> dict:
+    """Awaiting-decision result for a document the classifier rejected."""
+    record = empty_record()
+    record["file_name"] = original_name
+    record["stored_file_name"] = saved_path.name
+    record["file_path"] = str(saved_path)
+    record["raw_text"] = raw_text
+    record["status"] = "not_invoice"
+    record["_classification"] = verdict
+    record["_not_invoice_reason"] = (
+        verdict.get("reason") or "Gemini did not recognise this as an invoice."
+    )
+    record["_document_type"] = verdict.get("document_type")
+    return record
+ 
+ 
+def stage_upload(file_storage) -> tuple[Path, str]:
+    """
+    Save an upload to disk without processing it.
+ 
+    Splitting this out lets the web request finish as soon as the bytes are
+    stored, and hand the slow extraction to a background job.
+    """
+    config.validate()
+ 
+    original_name = secure_filename(file_storage.filename or "")
+    saved_path = save_upload(file_storage)
+    return saved_path, original_name
+ 
+ 
 def process_uploaded_file(file_storage) -> dict:
     """
     Full intelligent upload pipeline:
     1. Save file
-    2. Detect vendor and verify registration
-    3. Extract data (LlamaParse + Groq) when vendor is registered
-    4. Validate
+    2. Confirm the document is an invoice (Gemini gate), in parallel with
+       extracting it (LlamaParse + Groq)
+    3. Validate
+    4. Resolve the vendor, registering it when it is new
     5. Save to output/enriched.json
     6. Persist to VIM database (skipped when extraction fails)
+ 
+    A document the classifier rejects comes back with status "not_invoice"
+    and is left on disk so the user can choose to proceed or discard it.
+    """
+    saved_path, original_name = stage_upload(file_storage)
+    return process_saved_file(saved_path, original_name)
+ 
+ 
+def process_saved_file(
+    saved_path: Path,
+    original_name: str,
+    *,
+    skip_invoice_check: bool = False,
+) -> dict:
+    """
+    Run the pipeline on a file already saved to the upload directory.
+ 
+    Set skip_invoice_check to resume a document the classifier rejected,
+    after the user chose to proceed anyway.
     """
     from vim.extraction.json_store import upsert_record
-
+ 
     config.validate()
-
-    original_name = secure_filename(file_storage.filename or "")
-    logger.info("━" * 55)
-    logger.info("[PIPELINE START] File: '%s'", original_name)
-
-    # ── Step 1: Save ────────────────────────────────────────────
-    saved_path = save_upload(file_storage)
-
-    # ── Step 2: Detect vendor ───────────────────────────────────
-    logger.info("[STEP 2/6] Detecting vendor from document ...")
-    detected_name, raw_text, detect_error = detect_vendor_name(str(saved_path))
-
-    if detect_error:
-        logger.warning(
-            "[STEP 2/6] Vendor detection FAILED for '%s': %s",
-            original_name, detect_error
-        )
+    started = time.perf_counter()
+ 
+    def _log(step: str) -> None:
+        print(f"[upload {original_name}] {step} ({time.perf_counter() - started:.1f}s)")
+ 
+    is_image = saved_path.suffix.lower() in config.IMAGE_EXTENSIONS
+ 
+    # Images are judged from the pixels and extracted by vision, so OCR is
+    # skipped entirely. LlamaParse on a PNG is the slowest path we have.
+    if is_image:
+        if not skip_invoice_check:
+            _log("classifying image")
+            verdict = classify_image(saved_path, original_name)
+            if verdict.get("error"):
+                print("Invoice classification unavailable:", verdict["error"])
+            elif verdict.get("is_invoice") is False:
+                record = _not_invoice_result(
+                    original_name=original_name,
+                    saved_path=saved_path,
+                    raw_text="",
+                    verdict=verdict,
+                )
+                return _hold_as_rejected(record, "not_invoice")
+ 
+        _log("extracting image")
+        record = extract_from_file(str(saved_path), raw_text=None)
+        record["file_name"] = original_name
+        record["stored_file_name"] = saved_path.name
+        if record.get("_extraction_error"):
+            record["status"] = "extraction_failed"
+            upsert_record(record)
+            return record
+        return _persist_record(record, original_name, saved_path)
+ 
+    _log("parsing text")
+    raw_text, parse_error = load_document_text(str(saved_path))
+    if parse_error:
         record = empty_record()
         record["file_name"] = original_name
         record["stored_file_name"] = saved_path.name
         record["file_path"] = str(saved_path)
-        record["vendor_name"] = detected_name
-        record["_extraction_error"] = detect_error
-        is_vendor_issue = "registered vendor" in detect_error.lower()
-        record["status"] = "vendor_not_registered" if is_vendor_issue else "extraction_failed"
-        upsert_record(record)
-        logger.info("[PIPELINE END] '%s' → status=%s", original_name, record["status"])
-        return record
-
-    logger.info("[STEP 2/6] Detected vendor name: '%s'", detected_name)
-
-    # ── Step 3: Vendor registration gate ────────────────────────
-    logger.info("[STEP 3/6] Looking up registered vendor '%s' ...", detected_name)
-    vendor = find_registered_vendor(detected_name)
-    if not vendor:
-        logger.warning(
-            "[STEP 3/6] Vendor '%s' is NOT registered — blocking pipeline", detected_name
-        )
-        record = _vendor_gate_failure(
-            original_name=original_name,
-            saved_path=saved_path,
-            vendor_name=detected_name,
-            message=(
-                f"Vendor {detected_name!r} is not registered. "
-                "Add the vendor under Admin → Vendors before uploading."
-            ),
-        )
-        record["vendor_id"] = None
-        upsert_record(record)
-        logger.info("[PIPELINE END] '%s' → status=vendor_not_registered", original_name)
-        return record
-
-    logger.info(
-        "[STEP 3/6] Vendor matched: '%s' (VendorID=%s)",
-        vendor.VendorName, vendor.VendorID
-    )
-
-    # ── Step 4: Full extraction ─────────────────────────────────
-    logger.info("[STEP 4/6] Running LlamaParse + Groq extraction ...")
-    record = extract_from_file(str(saved_path), raw_text=raw_text)
-
-    # Keep human-readable filename in the record (not the uuid prefix on disk)
-    record["file_name"] = original_name
-    record["stored_file_name"] = saved_path.name
-    record["vendor_name"] = vendor.VendorName
-    record["vendor_id"] = vendor.VendorID
-
-    if record.get("_extraction_error"):
-        logger.error(
-            "[STEP 4/6] Extraction FAILED for '%s': %s",
-            original_name, record["_extraction_error"]
-        )
+        record["_extraction_error"] = parse_error
         record["status"] = "extraction_failed"
         upsert_record(record)
-        logger.info("[PIPELINE END] '%s' → status=extraction_failed", original_name)
         return record
-
-    validation_issues = record.get("_validation_issues", [])
-    logger.info(
-        "[STEP 4/6] Extraction OK — invoice_number='%s', total_due=%s, "
-        "line_items=%d, validation_issues=%d",
-        record.get("invoice_number"), record.get("total_due"),
-        len(record.get("line_items") or []), len(validation_issues)
+ 
+    # Classification and extraction both need only raw_text, so they run
+    # concurrently instead of one after the other. The cost is an extraction
+    # call wasted on the rare document that turns out not to be an invoice;
+    # the saving is the classifier's latency on every document that is one.
+    if not skip_invoice_check:
+        _log("classifying + extracting in parallel")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            verdict_task = pool.submit(classify_document, raw_text, original_name)
+            record_task = pool.submit(
+                extract_from_file, str(saved_path), raw_text=raw_text
+            )
+            verdict = verdict_task.result()
+            record = record_task.result()
+ 
+        # A classifier outage must not block the pipeline; note it and continue.
+        if verdict.get("error"):
+            print("Invoice classification unavailable:", verdict["error"])
+        elif verdict.get("is_invoice") is False:
+            record = _not_invoice_result(
+                original_name=original_name,
+                saved_path=saved_path,
+                raw_text=raw_text,
+                verdict=verdict,
+            )
+            return _hold_as_rejected(record, "not_invoice")
+    else:
+        _log("extracting")
+        record = extract_from_file(str(saved_path), raw_text=raw_text)
+ 
+    _log("persisting")
+    record = _persist_record(record, original_name, saved_path)
+    _log(f"done status={record.get('status')}")
+    return record
+ 
+ 
+def persist_approved_vendor(
+    stored_file_name: str,
+    original_name: str,
+    user_id=None,
+) -> dict:
+    """
+    Register the vendor the admin approved and save the already-extracted invoice.
+ 
+    Reuses the record from enriched.json so extraction is not run again.
+    """
+    from vim.extraction.json_store import find_by_stored_name
+ 
+    record = find_by_stored_name(stored_file_name)
+    if record is None:
+        raise ValueError("Extracted data for that upload is no longer available.")
+ 
+    saved_path = resolve_pending_upload(stored_file_name)
+    if saved_path is None:
+        saved_path = Path(record.get("file_path") or stored_file_name)
+ 
+    return _persist_record(
+        record,
+        original_name or record.get("file_name") or stored_file_name,
+        saved_path,
+        register_new_vendor=True,
+        decided_by=user_id,
     )
-    if validation_issues:
-        logger.debug("[STEP 4/6] Extraction validation issues: %s", validation_issues)
-
-    # ── Step 5: Save to enriched.json ───────────────────────────
-    logger.info("[STEP 5/6] Saving record to enriched.json ...")
-    upsert_record(record)
-    logger.info("[STEP 5/6] enriched.json updated")
-
-    # ── Step 6: Persist to DB ───────────────────────────────────
-    logger.info("[STEP 6/6] Persisting invoice to database ...")
-    try:
-        invoice = insert_record(record)
-        db.session.commit()
-        record["invoice_id"] = invoice.InvoiceID
-        logger.info(
-            "[STEP 6/6] DB persist OK — InvoiceID=%s, InvoiceNumber='%s'",
-            invoice.InvoiceID, invoice.InvoiceNumber
-        )
-    except Exception as e:
-        db.session.rollback()
-        record["status"] = "db_error"
-        record["_db_error"] = str(e)
-        logger.error("[STEP 6/6] DB persist FAILED for '%s': %s", original_name, e)
+ 
+ 
+def _persist_record(
+    record: dict,
+    original_name: str,
+    saved_path: Path,
+    *,
+    register_new_vendor: bool = False,
+    decided_by=None,
+) -> dict:
+    """Attach filenames, resolve the vendor, and write JSON + SQLite."""
+    from vim.extraction.json_store import upsert_record
+ 
+    record["file_name"] = original_name
+    record["stored_file_name"] = saved_path.name if saved_path else record.get("stored_file_name")
+ 
+    if record.get("_extraction_error"):
+        record["status"] = "extraction_failed"
         upsert_record(record)
-        logger.info("[PIPELINE END] '%s' → status=db_error", original_name)
         return record
-
+ 
+    # SQLite takes one writer at a time. Serialising this costs almost
+    # nothing because the slow work has already finished.
+    with _db_write_lock:
+        vendor, vendor_action = find_or_create_vendor(
+            record, create=register_new_vendor
+        )
+ 
+        if not vendor:
+            db.session.rollback()
+            if not (record.get("vendor_name") or "").strip():
+                failed = _vendor_gate_failure(
+                    original_name=original_name,
+                    saved_path=saved_path,
+                    vendor_name=record.get("vendor_name"),
+                    message=(
+                        "Could not read the issuing vendor from this document. "
+                        "Add the vendor under Admin → Vendors, then upload again."
+                    ),
+                )
+                upsert_record(failed)
+                return failed
+ 
+            # Extracted, but the vendor is new. Hold the invoice until the
+            # admin chooses to register them or discard this upload.
+            record["vendor_id"] = None
+            record["status"] = "vendor_not_registered"
+            record["_pending_vendor"] = True
+            record.pop("_extraction_error", None)
+            return _hold_as_rejected(record, "vendor_not_registered")
+ 
+        record["vendor_name"] = vendor.VendorName
+        record["vendor_id"] = vendor.VendorID
+        record["_vendor_action"] = vendor_action
+        record.pop("_pending_vendor", None)
+ 
+        try:
+            invoice = insert_record(record)
+            db.session.commit()
+            record["invoice_id"] = invoice.InvoiceID
+            from vim.extraction.rejections import DECISION_PROCEEDED, mark_decision
+            mark_decision(
+                record.get("stored_file_name"),
+                DECISION_PROCEEDED,
+                user_id=decided_by,
+            )
+        except Exception as e:
+            db.session.rollback()
+            record["status"] = "db_error"
+            record["_db_error"] = str(e)
+            upsert_record(record)
+            return record
+ 
     record["status"] = _resolve_status(record)
     upsert_record(record)
-    logger.info(
-        "[PIPELINE END] '%s' → status=%s  (InvoiceID=%s)",
-        original_name, record["status"], record.get("invoice_id")
-    )
-    logger.info("━" * 55)
     return record
-
+ 

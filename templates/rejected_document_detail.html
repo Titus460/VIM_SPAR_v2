@@ -1,0 +1,52 @@
+{% extends 'admin_base.html' %}
+
+{% block title %} Rejected document {% endblock %}
+
+{% block content %}
+<div class="container" style="display:block; max-width:960px; margin:0 auto;">
+    <div class="card" style="text-align:left;">
+        <h3>{{ row.FileName }}</h3>
+        <table class="table table-sm">
+            <tbody>
+                <tr><th style="width:220px;">Reason</th>
+                    <td>
+                        {% if row.Reason == 'not_invoice' %}Not an invoice
+                        {% elif row.Reason == 'vendor_not_registered' %}Unknown vendor
+                        {% else %}{{ row.Reason }}{% endif %}
+                    </td>
+                </tr>
+                <tr><th>Decision</th><td>{{ row.Decision }}</td></tr>
+                <tr><th>Received</th>
+                    <td>{{ row.CreatedDate.strftime('%Y-%m-%d %H:%M:%S') if row.CreatedDate else '—' }}</td>
+                </tr>
+                <tr><th>Decided</th>
+                    <td>{{ row.DecidedDate.strftime('%Y-%m-%d %H:%M:%S') if row.DecidedDate else '—' }}</td>
+                </tr>
+                <tr><th>Stored file</th><td>{{ row.StoredFileName }}</td></tr>
+                <tr><th>Path</th><td>{{ row.StoragePath or '—' }}</td></tr>
+                <tr><th>Detected type</th><td>{{ row.DocumentType or '—' }}</td></tr>
+                <tr><th>Classifier reason</th><td>{{ row.ClassifierReason or '—' }}</td></tr>
+                <tr><th>Vendor</th><td>{{ row.VendorName or '—' }}</td></tr>
+                <tr><th>Invoice #</th><td>{{ row.InvoiceNumber or '—' }}</td></tr>
+                <tr><th>Amount</th>
+                    <td>
+                        {% if row.InvoiceAmount is not none %}
+                            {{ row.InvoiceAmount }} {{ row.Currency or '' }}
+                        {% else %}—{% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        {% if row.RawTextPreview %}
+        <h4>Text preview</h4>
+        <pre style="background:#f5f5f5; padding:12px; border-radius:8px; max-height:280px; overflow:auto; font-size:0.85em; white-space:pre-wrap;">{{ row.RawTextPreview }}</pre>
+        {% endif %}
+
+        <h4>Extracted snapshot</h4>
+        <pre style="background:#f5f5f5; padding:12px; border-radius:8px; max-height:400px; overflow:auto; font-size:0.85em;">{{ payload_json }}</pre>
+
+        <a class="button" href="{{ url_for('admin_rejected_documents') }}">← Back to rejected documents</a>
+    </div>
+</div>
+{% endblock %}

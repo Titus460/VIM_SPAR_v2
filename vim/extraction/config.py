@@ -15,6 +15,9 @@ GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 RESULT_TYPE: str = os.getenv("RESULT_TYPE", "markdown")
 NUM_WORKERS: int = int(os.getenv("NUM_WORKERS", "4"))
 
+GEMINI_API_KEY: str = (os.getenv("GEMINI_API_KEY") or "").strip()
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+
 UPLOAD_DIR: Path = PROJECT_ROOT / os.getenv("UPLOAD_DIR", "uploads/invoices")
 OUTPUT_DIR: Path = PROJECT_ROOT / os.getenv("OUTPUT_DIR", "output")
 
@@ -33,6 +36,7 @@ Extract the full text content, preserving layout and structure:
 
 SUPPORTED_EXTENSIONS: list[str] = [
     ".pdf", ".docx", ".pptx", ".html",
+    ".xlsx", ".xls", ".xlsm", ".csv", ".txt",
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif",
 ]
 
@@ -46,12 +50,21 @@ def _read_keys() -> tuple[str, str]:
     groq = (file_values.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY") or "").strip()
     return llama, groq
 
-
+def read_gemini_key() -> str:
+    """Read the Gemini key from .env, refreshing the module-level value."""
+    load_dotenv(ENV_PATH, override=True)
+    file_values = dotenv_values(ENV_PATH)
+    key = (file_values.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+    global GEMINI_API_KEY
+    GEMINI_API_KEY = key
+    return key
+ 
 def load_keys_into_app(app) -> tuple[str, str]:
     """Load API keys from .env into Flask app.config (single source of truth)."""
     llama, groq = _read_keys()
     app.config["LLAMA_CLOUD_API_KEY"] = llama
     app.config["GROQ_API_KEY"] = groq
+    app.config["GEMINI_API_KEY"] = read_gemini_key()
     global LLAMA_CLOUD_API_KEY, GROQ_API_KEY
     LLAMA_CLOUD_API_KEY, GROQ_API_KEY = llama, groq
     return llama, groq

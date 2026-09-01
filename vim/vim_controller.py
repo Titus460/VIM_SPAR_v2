@@ -1,8 +1,11 @@
 from importlib.resources import files
+import mimetypes
+import time
+from pathlib import Path
 
-from flask import app, render_template, redirect, request, url_for, flash, session
+from flask import app, render_template, redirect, request, url_for, flash, session, Response
 from yaml import load_all
-from vim_database.models import User, Vendor, ValidationResult
+from vim_database.models import User, Vendor, ValidationResult, RejectedDocument
 from vim_database.models import SystemConfiguration
 from vim_database.database import db
 from functools import wraps
@@ -113,6 +116,13 @@ def register_routes(app):
     @admin_required
     def admin_vim_issues():
         return render_template('vim_admin_events_dashboard.html')
+
+    @app.route('/admin/pipeline')
+    @admin_required
+    def admin_pipeline_monitor():
+        from vim.pipeline_parser import parse_log
+        pipeline_rows = parse_log()
+        return render_template('vim_admin_pipeline.html', pipeline_rows=pipeline_rows)
 
     @app.route('/admin/users')
     @admin_required
@@ -512,6 +522,177 @@ def register_routes(app):
             config=config
         )
     
+#     # ---------------- INTELLIGENT INVOICE UPLOAD ----------------
+#     @app.route('/admin/invoice_upload', methods=['GET', 'POST'])
+#     @admin_required
+#     def admin_invoice_upload():
+#         from flask import current_app
+#         from vim.extraction import config as extraction_config
+
+#         results = []
+
+#         # Read directly from ..env file (avoids stale app.config from wrong server instance)
+#         llama_key, groq_key = extraction_config._read_keys()
+#         current_app.config["LLAMA_CLOUD_API_KEY"] = llama_key
+#         current_app.config["GROQ_API_KEY"] = groq_key
+#         extraction_config.LLAMA_CLOUD_API_KEY = llama_key
+#         extraction_config.GROQ_API_KEY = groq_key
+#         keys_ok = bool(llama_key and groq_key)
+
+#         if request.method == 'POST' and keys_ok:
+#             files = request.files.getlist('invoice_files')
+#             if not files or all(not f.filename for f in files):
+#                 flash("Please select at least one invoice file.", "warning")
+#                 return redirect(url_for('admin_invoice_upload'))
+
+#             from vim.extraction.service import process_uploaded_file
+
+#             processed_count = 0
+#             processed_invoice_ids = []
+#             total_files = sum(1 for f in files if f.filename)
+#             logger.info("[UPLOAD ROUTE] Received %d file(s) for processing", total_files)
+
+#             for f in files:
+#                 if not f.filename:
+#                     continue
+
+#                 logger.info("[UPLOAD ROUTE] Processing file: '%s'", f.filename)
+#                 try:
+#                     record = process_uploaded_file(f)
+#                     results.append(record)
+#                     invoice_id = record.get("invoice_id")
+#                     if record.get("invoice_id") is not None:
+#                         processed_count += 1
+#                         processed_invoice_ids.append(int(invoice_id))
+#                     logger.info(
+#                         "[UPLOAD ROUTE] '%s' → status=%s  invoice_id=%s",
+#                         f.filename, record.get("status"), record.get("invoice_id")
+#                     )
+
+#                 except ValueError as e:
+#                     logger.warning("[UPLOAD ROUTE] ValueError for '%s': %s", f.filename, e)
+#                     flash(str(e), "danger")
+
+#                 except OSError as e:
+#                     logger.error("[UPLOAD ROUTE] OSError for '%s': %s", f.filename, e)
+#                     flash(str(e).strip(), "danger")
+#                     break
+#                 except Exception as e:
+#                     logger.exception("[UPLOAD ROUTE] Unexpected error for '%s'", f.filename)
+#                     flash(f"Failed to process {f.filename}: {e}","danger")
+
+# # --------------------------------------------------
+# # STORE CURRENT UPLOAD IN SESSION
+# # --------------------------------------------------
+#             if processed_invoice_ids:
+#                 session["current_invoice_ids"] = processed_invoice_ids
+#                 session.modified = True
+#                 logger.info(
+#                     "[UPLOAD ROUTE] Stored %d invoice ID(s) in session: %s",
+#                     len(processed_invoice_ids), processed_invoice_ids
+#                 )
+
+# # --------------------------------------------------
+# # RUN VALIDATION AFTER ALL UPLOADS ARE PROCESSED
+# # --------------------------------------------------
+
+#             if processed_count:
+#                 try:
+#                     from vim.validation_setup.validation.run_validation import (
+#                         run_validation)
+
+#                     logger.info(
+#                         "[UPLOAD ROUTE] Triggering validation for %d invoice(s): %s",
+#                         len(processed_invoice_ids), processed_invoice_ids
+#                     )
+#                     validation_ok = run_validation(
+#                         invoice_ids=processed_invoice_ids or None
+#                     )
+
+#                     if validation_ok:
+#                         flash(
+#                             f"Successfully extracted and validated "
+#                             f"{processed_count} invoice(s).", "success")
+#                     else:
+#                         flash(
+#                             f"{processed_count} invoice(s) extracted. "
+#                             "Validation completed with warnings — check the event browser.",
+#                             "warning")
+
+#                 except Exception as e:
+#                     logger.exception("[UPLOAD ROUTE] Validation crashed: %s", e)
+#                     flash(f"Invoices were extracted, but validation failed: {e}", "danger")
+
+#         elif request.method == 'POST' and not keys_ok:
+#             flash(
+#                 "API keys not loaded. Save .env in the project root and restart the server.",
+#                 "danger",
+#             )
+
+#         return render_template('invoice_upload.html', results=results, keys_ok=keys_ok)
+
+#     # ---------------- INVOICE DATA EXTRACTION REVIEW ----------------
+#     @app.route('/admin/invoice_extraction', methods=['GET'])
+#     @admin_required
+#     def admin_invoice_extraction():
+#         from vim.extraction.json_store import load_all, ENRICHED_PATH
+
+#         records = load_all()
+#         rows = []
+#         for i, rec in enumerate(reversed(records)):
+#             rows.append({
+#                 "index": len(records) - 1 - i,
+#                 "file_name": rec.get("file_name") or rec.get("stored_file_name") or "—",
+#                 "vendor_name": rec.get("vendor_name") or "—",
+#                 "invoice_number": rec.get("invoice_number") or "—",
+#                 "invoice_date": rec.get("invoice_date") or "—",
+#                 "amount": rec.get("total_due") or "—",
+#                 "currency": rec.get("currency") or "",
+#                 "status": "Failed" if rec.get("_extraction_error") else (
+#                     "NeedsReview" if rec.get("_validation_issues") else "Success"
+#                 ),
+#                 "line_item_count": len(rec.get("line_items") or []),
+#             })
+
+#         return render_template(
+#             'invoice_extraction.html',
+#             extractions=rows,
+#             json_path=str(ENRICHED_PATH),
+#         )
+
+#     @app.route('/admin/invoice_extraction/<int:record_index>', methods=['GET'])
+#     @admin_required
+#     def admin_invoice_extraction_detail(record_index):
+#         import json
+#         from vim.extraction.json_store import load_all
+
+#         records = load_all()
+#         if record_index < 0 or record_index >= len(records):
+#             flash("Extraction record not found.", "warning")
+#             return redirect(url_for('admin_invoice_extraction'))
+
+#         record = records[record_index]
+#         return render_template(
+#             'invoice_extraction_detail.html',
+#             record=record,
+#             record_index=record_index,
+#             record_json=json.dumps(record, indent=2, default=str),
+#         )
+
+#     @app.route('/admin/invoice_extraction/download', methods=['GET'])
+#     @admin_required
+#     def admin_invoice_extraction_download():
+#         from flask import send_file
+#         from vim.extraction.json_store import ENRICHED_PATH, load_all, save_all
+
+#         if not ENRICHED_PATH.exists():
+#             save_all(load_all())
+#         if not ENRICHED_PATH.exists():
+#             flash("No extractions yet. Upload an invoice first.", "warning")
+#             return redirect(url_for('admin_invoice_upload'))
+
+#         return send_file(ENRICHED_PATH, as_attachment=True, download_name="enriched.json")
+
     # ---------------- INTELLIGENT INVOICE UPLOAD ----------------
     @app.route('/admin/invoice_upload', methods=['GET', 'POST'])
     @admin_required
@@ -535,83 +716,37 @@ def register_routes(app):
                 flash("Please select at least one invoice file.", "warning")
                 return redirect(url_for('admin_invoice_upload'))
 
-            from vim.extraction.service import process_uploaded_file
+            from vim.extraction import jobs
+            from vim.extraction.service import stage_upload
 
-            processed_count = 0
-            processed_invoice_ids = []
-            total_files = sum(1 for f in files if f.filename)
-            logger.info("[UPLOAD ROUTE] Received %d file(s) for processing", total_files)
-
+# --------------------------------------------------
+# SAVE THE FILES, THEN EXTRACT IN THE BACKGROUND
+#
+# Extraction waits on three external APIs per document, so doing it inside
+# this request left the browser on a blank page for the whole batch. The
+# request now only stores the bytes and redirects to a progress page.
+# --------------------------------------------------
+            staged = []
             for f in files:
                 if not f.filename:
                     continue
-
-                logger.info("[UPLOAD ROUTE] Processing file: '%s'", f.filename)
                 try:
-                    record = process_uploaded_file(f)
-                    results.append(record)
-                    invoice_id = record.get("invoice_id")
-                    if record.get("invoice_id") is not None:
-                        processed_count += 1
-                        processed_invoice_ids.append(int(invoice_id))
-                    logger.info(
-                        "[UPLOAD ROUTE] '%s' → status=%s  invoice_id=%s",
-                        f.filename, record.get("status"), record.get("invoice_id")
-                    )
-
+                    staged.append(stage_upload(f))
                 except ValueError as e:
-                    logger.warning("[UPLOAD ROUTE] ValueError for '%s': %s", f.filename, e)
                     flash(str(e), "danger")
-
                 except OSError as e:
-                    logger.error("[UPLOAD ROUTE] OSError for '%s': %s", f.filename, e)
                     flash(str(e).strip(), "danger")
                     break
                 except Exception as e:
-                    logger.exception("[UPLOAD ROUTE] Unexpected error for '%s'", f.filename)
-                    flash(f"Failed to process {f.filename}: {e}","danger")
+                    flash(f"Could not save {f.filename}: {e}", "danger")
 
-# --------------------------------------------------
-# STORE CURRENT UPLOAD IN SESSION
-# --------------------------------------------------
-            if processed_invoice_ids:
-                session["current_invoice_ids"] = processed_invoice_ids
-                session.modified = True
-                logger.info(
-                    "[UPLOAD ROUTE] Stored %d invoice ID(s) in session: %s",
-                    len(processed_invoice_ids), processed_invoice_ids
-                )
+            if not staged:
+                return redirect(url_for('admin_invoice_upload'))
 
-# --------------------------------------------------
-# RUN VALIDATION AFTER ALL UPLOADS ARE PROCESSED
-# --------------------------------------------------
+            job_id = jobs.create_job(staged)
+            jobs.start_job(current_app._get_current_object(), job_id, staged)
 
-            if processed_count:
-                try:
-                    from vim.validation_setup.validation.run_validation import (
-                        run_validation)
-
-                    logger.info(
-                        "[UPLOAD ROUTE] Triggering validation for %d invoice(s): %s",
-                        len(processed_invoice_ids), processed_invoice_ids
-                    )
-                    validation_ok = run_validation(
-                        invoice_ids=processed_invoice_ids or None
-                    )
-
-                    if validation_ok:
-                        flash(
-                            f"Successfully extracted and validated "
-                            f"{processed_count} invoice(s).", "success")
-                    else:
-                        flash(
-                            f"{processed_count} invoice(s) extracted. "
-                            "Validation completed with warnings — check the event browser.",
-                            "warning")
-
-                except Exception as e:
-                    logger.exception("[UPLOAD ROUTE] Validation crashed: %s", e)
-                    flash(f"Invoices were extracted, but validation failed: {e}", "danger")
+            return redirect(url_for('admin_invoice_upload_progress', job_id=job_id))
 
         elif request.method == 'POST' and not keys_ok:
             flash(
@@ -619,7 +754,491 @@ def register_routes(app):
                 "danger",
             )
 
-        return render_template('invoice_upload.html', results=results, keys_ok=keys_ok)
+        return render_template(
+            'invoice_upload.html',
+            results=results,
+            keys_ok=keys_ok,
+            gemini_ok=bool(extraction_config.read_gemini_key()),
+            gemini_model=extraction_config.GEMINI_MODEL,
+            pending_not_invoice=_pending_with_content(),
+            pending_new_vendor=_pending_new_vendors(),
+        )
+
+    @app.route('/admin/invoice_upload/progress/<job_id>', methods=['GET'])
+    @admin_required
+    def admin_invoice_upload_progress(job_id):
+        """Progress page for a background upload job; polls the status endpoint."""
+        from vim.extraction import jobs
+
+        job = jobs.get_job(job_id)
+        if not job:
+            flash("That upload has expired. Please upload again.", "warning")
+            return redirect(url_for('admin_invoice_upload'))
+
+        if job["status"] != "complete":
+            return render_template('invoice_upload_progress.html', job=job)
+
+        # Finished: apply the same session and flash handling the synchronous
+        # version used to do, then show the results.
+        results = job["results"]
+
+        if job.get("invoice_ids"):
+            session["current_invoice_ids"] = job["invoice_ids"]
+            session.modified = True
+
+        if job.get("validation_error"):
+            flash(
+                f"Invoices were extracted, but validation failed: "
+                f"{job['validation_error']}",
+                "danger",
+            )
+        elif job.get("invoice_ids"):
+            elapsed = job.get("elapsed_seconds")
+            timing = f" in {elapsed}s" if elapsed is not None else ""
+            flash(
+                f"Successfully extracted and validated "
+                f"{len(job['invoice_ids'])} invoice(s){timing}.",
+                "success",
+            )
+
+        for entry in job["files"]:
+            if entry["status"] in ("error", "extraction_failed", "db_error"):
+                flash(
+                    f"{entry['file_name']}: {entry.get('detail') or entry['status']}",
+                    "danger",
+                )
+
+        _flash_vendor_registrations(results)
+        _remember_pending_not_invoice(results)
+        _remember_pending_new_vendor(results)
+
+        from vim.extraction import config as extraction_config
+
+        return render_template(
+            'invoice_upload.html',
+            results=results,
+            keys_ok=True,
+            gemini_ok=bool(extraction_config.read_gemini_key()),
+            gemini_model=extraction_config.GEMINI_MODEL,
+            pending_not_invoice=_pending_with_content(),
+            elapsed_seconds=job.get("elapsed_seconds"),
+            pending_new_vendor=_pending_new_vendors(),
+        )
+
+    @app.route('/admin/invoice_upload/status/<job_id>', methods=['GET'])
+    @admin_required
+    def admin_invoice_upload_status(job_id):
+        """JSON status polled by the progress page."""
+        from flask import jsonify
+        from vim.extraction import jobs
+
+        job = jobs.get_job(job_id)
+        if not job:
+            return jsonify({"status": "expired"}), 404
+
+        elapsed = round(time.time() - job["created_at"], 1)
+        return jsonify({
+            "status": job["status"],
+            "total": job["total"],
+            "finished": job["finished"],
+            "elapsed_seconds": job.get("elapsed_seconds") if job["status"] == "complete" else elapsed,
+            "created_at": job.get("created_at"),
+            "files": [
+                {
+                    "file_name": f["file_name"],
+                    "status": f["status"],
+                    "detail": f.get("detail"),
+                    "elapsed_seconds": f.get("elapsed_seconds"),
+                }
+                for f in job["files"]
+            ],
+        })
+
+    def _flash_vendor_registrations(records):
+        """Tell the admin which vendors the upload added to the register."""
+        created = []
+        reactivated = []
+        for r in records:
+            name = r.get("vendor_name")
+            if not name or r.get("invoice_id") is None:
+                continue
+            if r.get("_vendor_action") == "created":
+                created.append(name)
+            elif r.get("_vendor_action") == "reactivated":
+                reactivated.append(name)
+
+        if created:
+            flash(
+                "Registered new vendor(s) from the uploaded invoice(s): "
+                f"{', '.join(sorted(set(created)))}. "
+                "Review their GST number and contact details under Admin → Vendors.",
+                "info",
+            )
+        if reactivated:
+            flash(
+                "Reactivated inactive vendor(s) found on the uploaded invoice(s): "
+                f"{', '.join(sorted(set(reactivated)))}.",
+                "info",
+            )
+
+    def _remember_pending_not_invoice(records):
+        """Queue classifier-rejected uploads for an explicit user decision."""
+        pending = [
+            {
+                "file_name": r.get("file_name"),
+                "stored_file_name": r.get("stored_file_name"),
+                "document_type": r.get("_document_type"),
+                "reason": r.get("_not_invoice_reason"),
+                "confidence": (r.get("_classification") or {}).get("confidence"),
+            }
+            for r in records
+            if r.get("status") == "not_invoice" and r.get("stored_file_name")
+        ]
+        if pending:
+            session['pending_not_invoice'] = pending
+            session.modified = True
+
+    def _remember_pending_new_vendor(records):
+        """Queue unknown-vendor invoices for an explicit register-or-stop decision."""
+        incoming = [
+            {
+                "file_name": r.get("file_name"),
+                "stored_file_name": r.get("stored_file_name"),
+                "vendor_name": r.get("vendor_name"),
+                "invoice_number": r.get("invoice_number"),
+                "total_due": r.get("total_due"),
+                "currency": r.get("currency"),
+            }
+            for r in records
+            if r.get("status") == "vendor_not_registered" and r.get("stored_file_name")
+        ]
+        if not incoming:
+            return
+
+        existing = {
+            p.get("stored_file_name"): p
+            for p in (session.get("pending_new_vendor") or [])
+            if p.get("stored_file_name")
+        }
+        for item in incoming:
+            existing[item["stored_file_name"]] = item
+        session["pending_new_vendor"] = list(existing.values())
+        session.modified = True
+        flash(
+            f"{len(incoming)} invoice(s) extracted from a vendor that is not "
+            "registered. Choose whether to register them or stop.",
+            "warning",
+        )
+
+    def _pending_new_vendors():
+        """Queued unknown-vendor invoices plus details from enriched.json."""
+        from vim.extraction.json_store import find_by_stored_name
+
+        items = []
+        for p in session.get("pending_new_vendor") or []:
+            rec = find_by_stored_name(p.get("stored_file_name")) or {}
+            items.append({
+                **p,
+                "vendor_name": rec.get("vendor_name") or p.get("vendor_name"),
+                "vendor_gst_number": rec.get("vendor_gst_number"),
+                "vendor_vat_number": rec.get("vendor_vat_number"),
+                "vendor_address": rec.get("vendor_address"),
+                "vendor_email": rec.get("vendor_email"),
+                "vendor_phone_number": rec.get("vendor_phone_number"),
+                "vendor_code": rec.get("vendor_code"),
+                "invoice_number": rec.get("invoice_number") or p.get("invoice_number"),
+                "invoice_date": rec.get("invoice_date"),
+                "total_due": rec.get("total_due") if rec.get("total_due") is not None else p.get("total_due"),
+                "currency": rec.get("currency") or p.get("currency"),
+            })
+        return items
+
+    # Document text lives in enriched.json, not the session — the session is a
+    # signed cookie and would overflow its ~4KB limit.
+    PENDING_PREVIEW_CHARS = 4000
+
+    def _pending_record_text(file_name, stored_file_name):
+        """Fetch the parsed text of a queued document from enriched.json."""
+        from vim.extraction.json_store import load_all
+
+        for rec in load_all():
+            key = rec.get("file_name") or rec.get("stored_file_name")
+            if key and key in (file_name, stored_file_name):
+                return (rec.get("raw_text") or "").strip()
+        return ""
+
+    def _pending_with_content():
+        """Queued documents plus a preview of what the classifier read."""
+        from vim.extraction import config as extraction_config
+
+        items = []
+        for p in session.get('pending_not_invoice') or []:
+            text = _pending_record_text(
+                p.get("file_name"), p.get("stored_file_name")
+            )
+            suffix = Path(p.get("stored_file_name") or "").suffix.lower()
+            items.append({
+                **p,
+                "is_image": suffix in extraction_config.IMAGE_EXTENSIONS,
+                "preview": text[:PENDING_PREVIEW_CHARS],
+                "preview_truncated": len(text) > PENDING_PREVIEW_CHARS,
+                "char_count": len(text),
+            })
+        return items
+
+    # ---------------- IMAGE PREVIEW OF A QUEUED DOCUMENT ----------------
+    @app.route('/admin/invoice_upload/pending_image')
+    @admin_required
+    def admin_invoice_upload_pending_image():
+        from vim.extraction.service import resolve_pending_upload
+
+        stored_name = request.args.get('stored_file_name')
+
+        queued = any(
+            p.get('stored_file_name') == stored_name
+            for p in (session.get('pending_not_invoice') or [])
+        )
+        if not queued:
+            return Response("Not awaiting a decision.", status=404,
+                            mimetype='text/plain')
+
+        path = resolve_pending_upload(stored_name)
+        if path is None or path.suffix.lower() not in (
+            '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif'
+        ):
+            return Response("No image available.", status=404,
+                            mimetype='text/plain')
+
+        # Served from memory rather than send_file: Windows keeps a handle on
+        # the open file, which can block deleting it on "Stop & discard".
+        mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+        return Response(path.read_bytes(), mimetype=mime)
+
+    # ---------------- FULL TEXT OF A QUEUED DOCUMENT ----------------
+    @app.route('/admin/invoice_upload/pending_text')
+    @admin_required
+    def admin_invoice_upload_pending_text():
+        stored_name = request.args.get('stored_file_name')
+
+        entry = next(
+            (
+                p for p in (session.get('pending_not_invoice') or [])
+                if p.get('stored_file_name') == stored_name
+            ),
+            None,
+        )
+        if entry is None:
+            return Response(
+                "That upload is no longer awaiting a decision.",
+                status=404,
+                mimetype='text/plain',
+            )
+
+        text = _pending_record_text(
+            entry.get('file_name'), entry.get('stored_file_name')
+        )
+        header = f"--- {entry.get('file_name')} - text read by the AI check ---\n\n"
+        return Response(
+            header + (text or "(no text was extracted from this document)"),
+            content_type='text/plain; charset=utf-8',
+        )
+
+    # ---------------- NOT-AN-INVOICE DECISION ----------------
+    @app.route('/admin/invoice_upload/decide', methods=['POST'])
+    @admin_required
+    def admin_invoice_upload_decide():
+        from vim.extraction.service import (
+            discard_pending_upload,
+            resolve_pending_upload,
+        )
+
+        action = request.form.get('action')
+        stored_name = request.form.get('stored_file_name')
+
+        pending = session.get('pending_not_invoice') or []
+        entry = next(
+            (p for p in pending if p.get('stored_file_name') == stored_name),
+            None,
+        )
+
+        # Only files this session flagged are actionable, so a forged
+        # stored_file_name cannot be pushed through the pipeline.
+        if entry is None:
+            flash("That upload is no longer awaiting a decision.", "warning")
+            return redirect(url_for('admin_invoice_upload'))
+
+        original_name = entry.get('file_name') or stored_name
+
+        if action == 'stop':
+            discard_pending_upload(
+                stored_name, original_name, user_id=session.get("user_id")
+            )
+            flash(
+                f"Stopped '{original_name}'. It was kept in Rejected Documents "
+                "for later review and was not saved as an invoice.",
+                "info",
+            )
+
+        elif action == 'proceed':
+            saved_path = resolve_pending_upload(stored_name)
+            if saved_path is None:
+                flash(
+                    f"'{original_name}' is no longer available on disk. "
+                    "Please upload it again.",
+                    "danger",
+                )
+            else:
+                _force_process(saved_path, original_name)
+
+        else:
+            flash("Unknown action.", "warning")
+
+        session['pending_not_invoice'] = [
+            p for p in pending if p.get('stored_file_name') != stored_name
+        ]
+        session.modified = True
+
+        return redirect(url_for('admin_invoice_upload'))
+
+    @app.route('/admin/invoice_upload/vendor_decide', methods=['POST'])
+    @admin_required
+    def admin_invoice_upload_vendor_decide():
+        from vim.extraction.service import (
+            discard_pending_upload,
+            persist_approved_vendor,
+        )
+
+        action = request.form.get('action')
+        stored_name = request.form.get('stored_file_name')
+
+        pending = session.get('pending_new_vendor') or []
+        entry = next(
+            (p for p in pending if p.get('stored_file_name') == stored_name),
+            None,
+        )
+        if entry is None:
+            flash("That upload is no longer awaiting a vendor decision.", "warning")
+            return redirect(url_for('admin_invoice_upload'))
+
+        original_name = entry.get('file_name') or stored_name
+        vendor_name = entry.get('vendor_name') or 'this vendor'
+
+        if action == 'stop':
+            discard_pending_upload(
+                stored_name, original_name, user_id=session.get("user_id")
+            )
+            flash(
+                f"Stopped '{original_name}'. {vendor_name} was not registered. "
+                "The document was kept in Rejected Documents for later review.",
+                "info",
+            )
+
+        elif action == 'proceed':
+            try:
+                record = persist_approved_vendor(
+                    stored_name, original_name, user_id=session.get("user_id")
+                )
+            except Exception as e:
+                flash(f"Could not register {vendor_name}: {e}", "danger")
+                return redirect(url_for('admin_invoice_upload'))
+
+            invoice_id = record.get("invoice_id")
+            if invoice_id is None:
+                flash(
+                    f"Registered '{vendor_name}' but the invoice was not saved: "
+                    f"{record.get('_db_error') or record.get('status')}",
+                    "warning",
+                )
+            else:
+                session["current_invoice_ids"] = [int(invoice_id)]
+                session.modified = True
+                try:
+                    from vim.validation_setup.validation.run_validation import (
+                        run_validation,
+                    )
+                    run_validation()
+                    flash(
+                        f"Registered '{vendor_name}' and saved invoice "
+                        f"{record.get('invoice_number') or invoice_id}.",
+                        "success",
+                    )
+                except Exception as e:
+                    flash(
+                        f"Registered '{vendor_name}' and saved the invoice, "
+                        f"but validation failed: {e}",
+                        "danger",
+                    )
+        else:
+            flash("Unknown action.", "warning")
+
+        session['pending_new_vendor'] = [
+            p for p in pending if p.get('stored_file_name') != stored_name
+        ]
+        session.modified = True
+        return redirect(url_for('admin_invoice_upload'))
+
+    def _force_process(saved_path, original_name):
+        """Run the pipeline on a rejected document the user chose to keep."""
+        from vim.extraction.service import process_saved_file
+
+        try:
+            record = process_saved_file(
+                saved_path, original_name, skip_invoice_check=True
+            )
+        except Exception as e:
+            flash(f"Failed to process '{original_name}': {e}", "danger")
+            return
+
+        invoice_id = record.get("invoice_id")
+        if invoice_id is None:
+            if record.get("status") == "vendor_not_registered":
+                _remember_pending_new_vendor([record])
+                return
+            reason = (
+                record.get("_extraction_error")
+                or record.get("_db_error")
+                or record.get("status")
+                or "unknown error"
+            )
+            flash(
+                f"Processed '{original_name}' but nothing was saved: {reason}",
+                "warning",
+            )
+            return
+
+        session["current_invoice_ids"] = [int(invoice_id)]
+        session.modified = True
+        _flash_vendor_registrations([record])
+        from vim.extraction.rejections import DECISION_PROCEEDED, mark_decision
+        mark_decision(
+            saved_path.name, DECISION_PROCEEDED, user_id=session.get("user_id")
+        )
+
+        try:
+            from vim.validation_setup.validation.run_validation import run_validation
+            run_validation()
+            flash(
+                f"Processed '{original_name}' as an invoice and saved it "
+                f"(invoice ID {invoice_id}).",
+                "success",
+            )
+        except Exception as e:
+            flash(
+                f"Saved '{original_name}' (invoice ID {invoice_id}), "
+                f"but validation failed: {e}",
+                "danger",
+            )
+
+    def _document_type_label(record):
+        """Prefer the label printed on the document, fall back to the code."""
+        from vim.extraction.schema import DOCUMENT_TYPE_CODES
+
+        label = (record.get("document_type") or "").strip()
+        if label:
+            return label
+
+        code = record.get("document_type_code")
+        return DOCUMENT_TYPE_CODES.get(code, "—")
 
     # ---------------- INVOICE DATA EXTRACTION REVIEW ----------------
     @app.route('/admin/invoice_extraction', methods=['GET'])
@@ -633,6 +1252,7 @@ def register_routes(app):
             rows.append({
                 "index": len(records) - 1 - i,
                 "file_name": rec.get("file_name") or rec.get("stored_file_name") or "—",
+                "document_type": _document_type_label(rec),
                 "vendor_name": rec.get("vendor_name") or "—",
                 "invoice_number": rec.get("invoice_number") or "—",
                 "invoice_date": rec.get("invoice_date") or "—",
@@ -661,12 +1281,15 @@ def register_routes(app):
             flash("Extraction record not found.", "warning")
             return redirect(url_for('admin_invoice_extraction'))
 
+        from vim.extraction.schema import HEADER_FIELD_GROUPS
+
         record = records[record_index]
         return render_template(
             'invoice_extraction_detail.html',
             record=record,
             record_index=record_index,
             record_json=json.dumps(record, indent=2, default=str),
+            header_field_groups=HEADER_FIELD_GROUPS,
         )
 
     @app.route('/admin/invoice_extraction/download', methods=['GET'])
@@ -682,6 +1305,36 @@ def register_routes(app):
             return redirect(url_for('admin_invoice_upload'))
 
         return send_file(ENRICHED_PATH, as_attachment=True, download_name="enriched.json")
+
+    # ---------------- REJECTED DOCUMENTS ----------------
+    @app.route('/admin/rejected_documents', methods=['GET'])
+    @admin_required
+    def admin_rejected_documents():
+        rows = (
+            RejectedDocument.query
+            .order_by(RejectedDocument.CreatedDate.desc())
+            .all()
+        )
+        return render_template('rejected_documents.html', rows=rows)
+
+    @app.route('/admin/rejected_documents/<int:rejection_id>', methods=['GET'])
+    @admin_required
+    def admin_rejected_document_detail(rejection_id):
+        import json
+
+        row = db.session.get(RejectedDocument, rejection_id)
+        if row is None:
+            flash("Rejected document not found.", "warning")
+            return redirect(url_for('admin_rejected_documents'))
+
+        payload = row.ExtractedJson or {}
+        return render_template(
+            'rejected_document_detail.html',
+            row=row,
+            payload=payload,
+            payload_json=json.dumps(payload, indent=2, default=str),
+        )
+
 
     # ---------------- INVOICE VALIDATION ----------------
     @app.route('/admin/invoice_validation', methods=['GET'])

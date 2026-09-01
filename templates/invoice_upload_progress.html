@@ -1,0 +1,120 @@
+{% extends 'admin_base.html' %}
+
+{% block title %} Extracting invoices {% endblock %}
+
+{% block content %}
+<div class="container" style="display:block; max-width:720px; margin:0 auto;">
+    <div class="card" style="text-align:left;">
+        <h3>Extracting {{ job.total }} file{{ 's' if job.total != 1 else '' }}…</h3>
+        <p style="color:#666; margin-bottom:4px;">
+            This screen updates as each document finishes.
+        </p>
+
+        <div id="timer" style="font-size:2.4em; font-variant-numeric:tabular-nums; font-weight:700; color:#4b3832; margin:8px 0 4px;">
+            0.0s
+        </div>
+        <div id="timer-label" style="color:#666; font-size:0.9em; margin-bottom:16px;">
+            elapsed
+        </div>
+
+        <div style="margin:16px 0;">
+            <div style="background:#eee; border-radius:8px; overflow:hidden; height:14px;">
+                <div id="bar" style="background:#8d6e63; height:14px; width:0%;"></div>
+            </div>
+            <div id="counts" style="margin-top:8px; font-size:0.9em;">
+                0 of {{ job.total }} finished
+            </div>
+        </div>
+
+        <ul id="files" style="list-style:none; padding:0;">
+            {% for f in job.files %}
+            <li data-index="{{ loop.index0 }}" style="padding:8px 0; border-bottom:1px solid #eee;">
+                <strong>{{ f.file_name }}</strong>
+                <span class="elapsed" style="margin-left:8px; color:#666; font-variant-numeric:tabular-nums;"></span>
+                <span class="status" style="margin-left:8px; color:#888;">queued</span>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+
+<script>
+const statusUrl = {{ url_for('admin_invoice_upload_status', job_id=job.id) | tojson }};
+const doneUrl = {{ url_for('admin_invoice_upload_progress', job_id=job.id) | tojson }};
+const startedAt = {{ (job.created_at or 0) | float }};
+const pageLoadedAt = Date.now();
+
+const colours = {
+    queued: "#888",
+    processing: "#0d6efd",
+    success: "green",
+    needs_review: "#e0a800",
+    not_invoice: "#e0a800",
+    error: "red",
+    extraction_failed: "red",
+    db_error: "red",
+    vendor_not_registered: "#0d6efd",
+};
+
+function formatSeconds(value) {
+    const n = Number(value);
+    if (!isFinite(n) || n < 0) return "0.0s";
+    return n.toFixed(1) + "s";
+}
+
+function elapsedNow() {
+    if (startedAt) {
+        return Math.max(0, (Date.now() / 1000) - startedAt);
+    }
+    return (Date.now() - pageLoadedAt) / 1000;
+}
+
+function tick() {
+    document.getElementById("timer").textContent = formatSeconds(elapsedNow());
+}
+
+function paint(data) {
+    document.getElementById("counts").textContent =
+        data.finished + " of " + data.total + " finished";
+    const pct = data.total ? Math.round((data.finished / data.total) * 100) : 0;
+    document.getElementById("bar").style.width = pct + "%";
+
+    if (data.status === "complete" && data.elapsed_seconds != null) {
+        document.getElementById("timer").textContent = formatSeconds(data.elapsed_seconds);
+        document.getElementById("timer-label").textContent = "total time";
+    }
+
+    data.files.forEach(function (file, index) {
+        const li = document.querySelector('#files li[data-index="' + index + '"]');
+        if (!li) return;
+        const status = li.querySelector(".status");
+        const elapsed = li.querySelector(".elapsed");
+        status.textContent = file.status + (file.detail ? " — " + file.detail : "");
+        status.style.color = colours[file.status] || "#333";
+        if (file.elapsed_seconds != null) {
+            elapsed.textContent = formatSeconds(file.elapsed_seconds);
+        } else if (file.status === "processing") {
+            elapsed.textContent = "…";
+        }
+    });
+}
+
+function poll() {
+    fetch(statusUrl, { headers: { "Accept": "application/json" } })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+            paint(data);
+            if (data.status === "complete") {
+                window.location = doneUrl;
+            } else {
+                setTimeout(poll, 1000);
+            }
+        })
+        .catch(function () { setTimeout(poll, 2000); });
+}
+
+tick();
+setInterval(tick, 100);
+poll();
+</script>
+{% endblock %}
