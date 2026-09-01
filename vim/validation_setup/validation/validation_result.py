@@ -69,8 +69,16 @@ def save_validation_results(invoice, validation_result):
         )
         db.session.add(validation_record)
 
-    db.session.commit()
-    logger.info(
-        "[RESULT] Committed %d result row(s) for InvoiceID=%s",
-        len(results), invoice_id
-    )
+    try:
+        db.session.commit()
+        logger.info(
+            "[RESULT] Committed %d result row(s) for InvoiceID=%s",
+            len(results), invoice_id
+        )
+    except Exception as e:
+        db.session.rollback()
+        logger.error(
+            "[RESULT] Failed to commit validation results for InvoiceID=%s: %s",
+            invoice_id, e, exc_info=True
+        )
+        raise

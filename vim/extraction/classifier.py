@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 
 from vim.extraction import config
+from vim_logger import get_logger
+
+logger = get_logger("vim.extraction.classifier")
 
 _gemini_client = None
 
@@ -82,9 +85,11 @@ def _get_gemini_client():
 
         api_key = config.read_gemini_key()
         if not api_key:
+            logger.error("[CLASSIFY] GEMINI_API_KEY is not set in environment or .env")
             raise EnvironmentError(
                 "GEMINI_API_KEY is not set. Add it to .env and restart the server."
             )
+        logger.info("[CLASSIFY] Initialising Gemini client with model=%s", config.GEMINI_MODEL)
         _gemini_client = genai.Client(api_key=api_key)
     return _gemini_client
 
@@ -140,6 +145,7 @@ def _generate(contents):
 
     for attempt in range(_MAX_ATTEMPTS):
         try:
+            logger.debug("[CLASSIFY] Calling Gemini API (attempt %d/%d)", attempt + 1, _MAX_ATTEMPTS)
             return _get_gemini_client().models.generate_content(
                 model=config.GEMINI_MODEL,
                 contents=contents,
@@ -152,6 +158,7 @@ def _generate(contents):
             )
         except Exception as e:
             last_error = e
+            logger.warning("[CLASSIFY] Gemini attempt %d failed: %s", attempt + 1, _short_error(e))
             if attempt == _MAX_ATTEMPTS - 1 or not _is_transient(e):
                 raise
             time.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
@@ -190,10 +197,11 @@ def _ask_gemini(contents) -> dict:
 
     is_invoice = payload.get("is_invoice")
     if not isinstance(is_invoice, bool):
+        logger.error("[CLASSIFY] Invalid boolean for is_invoice: %s", payload)
         return {**blank, "error": f"unexpected classifier response: {payload!r}"}
 
     confidence = payload.get("confidence")
-    return {
+    verdict = {
         "is_invoice": is_invoice,
         "document_type": (payload.get("document_type") or "").strip() or None,
         "confidence": confidence if isinstance(confidence, (int, float)) else None,
@@ -201,6 +209,9 @@ def _ask_gemini(contents) -> dict:
         "error": None,
         "model": config.GEMINI_MODEL,
     }
+    logger.info("[CLASSIFY] Verdict: is_invoice=%s, doc_type='%s', conf=%s, reason='%s'",
+                is_invoice, verdict["document_type"], verdict["confidence"], verdict["reason"])
+    return verdict
 
 
 def classify_document(raw_text: str, file_name: str = "") -> dict:
@@ -210,7 +221,9 @@ def classify_document(raw_text: str, file_name: str = "") -> dict:
     Returns is_invoice / document_type / confidence / reason / error. On failure
     error is set and is_invoice is None, so the caller decides whether to block.
     """
+    logger.info("[CLASSIFY] Classifying document text for '%s' (%d chars)", file_name, len(raw_text or ""))
     if not (raw_text or "").strip():
+        logger.warning("[CLASSIFY] No text available to classify for '%s'", file_name)
         return {**_blank_verdict(), "error": "no text available to classify"}
 
     return _ask_gemini(
@@ -263,12 +276,15 @@ def classify_image(file_path, file_name: str = "") -> dict:
     extraction failure rather than a clear "not an invoice" answer.
     """
     path = Path(file_path)
+    logger.info("[CLASSIFY] Classifying image directly for '%s' (%s)", file_name or path.name, path)
     if not path.is_file():
+        logger.error("[CLASSIFY] File not found: %s", path)
         return {**_blank_verdict(), "error": f"file not found: {path}"}
 
     try:
         part = _image_part(path)
     except Exception as e:
+        logger.error("[CLASSIFY] Could not read image '%s': %s", path.name, e, exc_info=True)
         return {**_blank_verdict(), "error": f"could not read image: {e}"}
 
     return _ask_gemini([f"{_IMAGE_PROMPT}\n\n--- IMAGE ({file_name}) ---", part])

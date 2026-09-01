@@ -40,12 +40,12 @@ class ValidationEngine:
             )
             status = result.get("status", "?")
             if status == "PASSED":
-                logger.info("[ENGINE]   ✔ %-30s → %s", stage.name, status)
+                logger.info("[ENGINE]   [PASS] %-30s -> %s", stage.name, status)
             elif status == "SKIPPED":
-                logger.info("[ENGINE]   ⏭ %-30s → %s", stage.name, status)
+                logger.info("[ENGINE]   [SKIP] %-30s -> %s", stage.name, status)
             else:
                 logger.warning(
-                    "[ENGINE]   ✘ %-30s → %s | %s",
+                    "[ENGINE]   [FAIL] %-30s -> %s | %s",
                     stage.name, status, result.get("message", "")
                 )
             results.append(result)

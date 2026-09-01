@@ -44,8 +44,13 @@ def _coerce_money(value):
     if isinstance(value, (int, float)):
         return float(value), True
     if isinstance(value, str):
-        is_credit = "-" in value or value.strip().upper().endswith("CR")
-        cleaned = _MONEY_STRIP_RE.sub("", value)
+        stripped = value.strip()
+        # Accounting parenthetical notation: (123.45) means -123.45
+        is_parenthetical = stripped.startswith("(") and stripped.endswith(")")
+        if is_parenthetical:
+            stripped = stripped[1:-1].strip()
+        is_credit = is_parenthetical or "-" in stripped or stripped.upper().endswith("CR")
+        cleaned = _MONEY_STRIP_RE.sub("", stripped)
         if cleaned in ("", "-"):
             return value, False
         try:

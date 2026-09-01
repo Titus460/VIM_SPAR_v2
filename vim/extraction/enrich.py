@@ -11,6 +11,9 @@ from vim.extraction import config
 from vim.extraction.parser.core import parse_single_file
 from vim.extraction.schema import empty_record, SCHEMA_DESCRIPTION_FOR_PROMPT, CONFIDENCE_KEYS
 from vim.extraction.validator import validate_record
+from vim_logger import get_logger
+ 
+logger = get_logger("vim.extraction.enrich")
  
 _groq_client = None
  
@@ -122,13 +125,17 @@ Rules:
 def _load_raw_text(file_path: str) -> tuple[str | None, str | None]:
     """Parse document text via LlamaParse. Returns (raw_text, error)."""
     path = Path(file_path)
+    logger.info("[PARSE] Parsing '%s' via LlamaParse", path.name)
     try:
         docs = parse_single_file(str(path), verbose=False)
         raw_text = "\n\n".join(d.text or "" for d in docs)
         if not raw_text.strip():
+            logger.warning("[PARSE] No text extracted from '%s'", path.name)
             return None, "no text extracted from source document"
+        logger.debug("[PARSE] Extracted %d chars from '%s'", len(raw_text), path.name)
         return raw_text, None
     except Exception as e:
+        logger.error("[PARSE] LlamaParse failed for '%s': %s", path.name, e, exc_info=True)
         return None, str(e)
  
  
@@ -153,7 +160,8 @@ def detect_vendor_name(
         registered_vendors = registered_vendor_names()
  
     if not registered_vendors:
-        return None, None, "no registered vendors in system — add vendors under Admin → Vendors"
+        logger.warning("[VENDOR-DETECT] No registered vendors in system")
+        return None, None, "no registered vendors in system — add vendors under Admin -> Vendors"
  
     if raw_text is None:
         raw_text, error = _load_raw_text(file_path)
@@ -161,6 +169,8 @@ def detect_vendor_name(
             return None, None, error
  
     path = Path(file_path)
+    logger.info("[VENDOR-DETECT] Asking Groq to identify vendor in '%s' (%d candidates)",
+                path.name, len(registered_vendors))
     try:
         response = _get_groq_client().chat.completions.create(
             model=config.GROQ_MODEL,
@@ -178,12 +188,15 @@ def detect_vendor_name(
         payload = json.loads(_strip_fences(response.choices[0].message.content))
         vendor_name = payload.get("vendor_name")
         if vendor_name in (None, "", "null"):
+            logger.warning("[VENDOR-DETECT] No registered vendor matched in '%s'", path.name)
             return None, raw_text, (
                 "no registered vendor found on this invoice — "
-                "register the issuing vendor under Admin → Vendors, then re-upload"
+                "register the issuing vendor under Admin -> Vendors, then re-upload"
             )
+        logger.info("[VENDOR-DETECT] Vendor identified: '%s' in '%s'", vendor_name, path.name)
         return str(vendor_name).strip(), raw_text, None
     except Exception as e:
+        logger.error("[VENDOR-DETECT] Groq call failed for '%s': %s", path.name, e, exc_info=True)
         return None, raw_text, str(e)
  
  
@@ -208,6 +221,7 @@ def _finalize(raw_content: str) -> dict:
  
  
 def parse_image_direct(file_path: str) -> dict:
+    logger.info("[VISION] Sending '%s' to Groq Vision model", Path(file_path).name)
     try:
         img = Image.open(file_path)
  
@@ -244,16 +258,21 @@ def parse_image_direct(file_path: str) -> dict:
             temperature=0.1,
             max_tokens=4000,
         )
- 
-        return _finalize(response.choices[0].message.content)
+
+        result = _finalize(response.choices[0].message.content)
+        logger.info("[VISION] Extraction complete for '%s'", Path(file_path).name)
+        return result
  
     except Exception as e:
+        logger.error("[VISION] Failed for '%s': %s", Path(file_path).name, e, exc_info=True)
         record = empty_record()
         record["_extraction_error"] = str(e)
         return record
  
  
 def parse_text_direct(raw_text: str, source_label: str = "") -> dict:
+    logger.info("[EXTRACT] Sending '%s' to Groq text model (%d chars)",
+                source_label or "document", len(raw_text))
     try:
         if not raw_text.strip():
             raise ValueError("no text extracted from source document")
@@ -275,14 +294,13 @@ def parse_text_direct(raw_text: str, source_label: str = "") -> dict:
             max_tokens=4000,
             response_format={"type": "json_object"},
         )
-        print(
-            f"Groq extraction of {source_label or 'document'} "
-            f"took {time.perf_counter() - started:.1f}s"
-        )
+        elapsed = time.perf_counter() - started
+        logger.info("[EXTRACT] Groq extraction of '%s' took %.1fs", source_label or "document", elapsed)
  
         return _finalize(response.choices[0].message.content)
  
     except Exception as e:
+        logger.error("[EXTRACT] Groq failed for '%s': %s", source_label or "document", e, exc_info=True)
         record = empty_record()
         record["_extraction_error"] = str(e)
         return record
@@ -307,14 +325,16 @@ def extract_from_file(file_path: str, raw_text: str | None = None) -> dict:
     """Run the full extraction + validation pipeline on a single file."""
     path = Path(file_path)
     ext = path.suffix.lower()
+    logger.info("[EXTRACT] Starting extraction for '%s' (ext=%s)", path.name, ext)
  
     # Try Groq Vision for images only when a vision model is configured and available.
     # Most Groq accounts only have text models — fall back to LlamaParse + text.
     if raw_text is None and ext in config.IMAGE_EXTENSIONS and config.GROQ_VISION_MODEL:
         record = parse_image_direct(str(path))
         if not record.get("_extraction_error") and record.get("total_due") is not None:
-            pass  # vision succeeded
+            logger.debug("[EXTRACT] Vision path succeeded for '%s'", path.name)
         else:
+            logger.debug("[EXTRACT] Vision path failed/incomplete for '%s', falling back to text", path.name)
             record = _extract_via_text(str(path))
     else:
         record = _extract_via_text(str(path), raw_text=raw_text)
@@ -323,6 +343,9 @@ def extract_from_file(file_path: str, raw_text: str | None = None) -> dict:
     record["file_name"] = path.name
     record["file_path"] = str(path)
     if issues:
+        logger.warning("[EXTRACT] Validation issues for '%s': %s", path.name, issues)
         record["_validation_issues"] = issues
  
+    logger.info("[EXTRACT] Done for '%s' — invoice_number='%s', total_due=%s",
+                path.name, record.get("invoice_number"), record.get("total_due"))
     return record

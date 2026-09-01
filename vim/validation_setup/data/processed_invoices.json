@@ -1,110 +1,14 @@
 [
     {
+        "invoice_id": 2,
+        "invoice_number": "2602001",
+        "vendor_id": 3,
+        "processed_at": "2026-09-01T23:55:28.718153"
+    },
+    {
         "invoice_id": 3,
-        "invoice_number": "BOS-2026-1009",
-        "vendor_id": 4,
-        "processed_at": "2026-08-25T13:15:16.828769"
-    },
-    {
-        "invoice_id": 4,
-        "invoice_number": "BOS-2026-1010",
-        "vendor_id": 4,
-        "processed_at": "2026-08-25T13:15:17.120880"
-    },
-    {
-        "invoice_id": 5,
-        "invoice_number": "BOS-2026-1008",
-        "vendor_id": 4,
-        "processed_at": "2026-08-25T13:15:17.241433"
-    },
-    {
-        "invoice_id": 6,
-        "invoice_number": "BOS-2026-1006",
-        "vendor_id": 4,
-        "processed_at": "2026-08-25T13:15:17.583853"
-    },
-    {
-        "invoice_id": 9,
-        "invoice_number": "BOS-2026-1001",
-        "vendor_id": 4,
-        "processed_at": "2026-08-25T13:49:41.286795"
-    },
-    {
-        "invoice_id": 11,
-        "invoice_number": "BOS-2026-1005",
-        "vendor_id": 4,
-        "processed_at": "2026-08-27T16:35:13.555007"
-    },
-    {
-        "invoice_id": 13,
-        "invoice_number": "2604011",
-        "vendor_id": 5,
-        "processed_at": "2026-08-27T20:34:11.214966"
-    },
-    {
-        "invoice_id": 14,
-        "invoice_number": "2604017",
-        "vendor_id": 5,
-        "processed_at": "2026-08-28T12:03:35.407725"
-    },
-    {
-        "invoice_id": 15,
-        "invoice_number": "2605017",
-        "vendor_id": 5,
-        "processed_at": "2026-08-28T16:15:35.539811"
-    },
-    {
-        "invoice_id": 21,
-        "invoice_number": "2502011",
-        "vendor_id": 5,
-        "processed_at": "2026-08-31T19:07:03.114111"
-    },
-    {
-        "invoice_id": 22,
-        "invoice_number": "2501010",
-        "vendor_id": 5,
-        "processed_at": "2026-08-31T21:53:41.306060"
-    },
-    {
-        "invoice_id": 23,
-        "invoice_number": "2501018",
-        "vendor_id": 5,
-        "processed_at": "2026-08-31T22:11:40.459366"
-    },
-    {
-        "invoice_id": 19,
-        "invoice_number": "2504014",
-        "vendor_id": 5,
-        "processed_at": "2026-09-01T11:28:31.731483"
-    },
-    {
-        "invoice_id": 7,
-        "invoice_number": "BOS-2026-1003",
-        "vendor_id": 4,
-        "processed_at": "2026-09-01T16:51:59.422790"
-    },
-    {
-        "invoice_id": 8,
-        "invoice_number": "BOS-2026-1002",
-        "vendor_id": 4,
-        "processed_at": "2026-09-01T18:01:26.834435"
-    },
-    {
-        "invoice_id": 17,
-        "invoice_number": "2506016",
-        "vendor_id": 5,
-        "processed_at": "2026-09-01T18:55:53.998605"
-    },
-    {
-        "invoice_id": 18,
-        "invoice_number": "2501009",
-        "vendor_id": 5,
-        "processed_at": "2026-09-01T18:55:54.136312"
-    },
-    {
-        "invoice_id": 20,
-        "invoice_number": "2505015",
-        "vendor_id": 5,
-        "processed_at": "2026-09-01T18:55:54.417835"
+        "invoice_number": "2603004",
+        "vendor_id": 3,
+        "processed_at": "2026-09-02T00:41:27.781683"
     }
 ]

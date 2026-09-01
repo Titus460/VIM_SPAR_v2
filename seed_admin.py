@@ -2,6 +2,8 @@
 
 import argparse
 
+from werkzeug.security import generate_password_hash
+
 from app import create_app
 from vim_database.database import db
 from vim_database.models import User, Vendor
@@ -29,7 +31,7 @@ def seed(fresh: bool = False):
         if not admin:
             admin = User(
                 Username="admin",
-                PasswordHash="admin123",
+                PasswordHash=generate_password_hash("admin123"),
                 Email="admin@vim.local",
                 Role="admin",
                 VendorID=vendor.VendorID,

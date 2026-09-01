@@ -133,7 +133,12 @@ def _update_file(job_id, index, *, status, detail=None, record=None) -> None:
             entry["finished_at"] = now
             started = entry.get("started_at") or now
             entry["elapsed_seconds"] = round(now - started, 1)
-            job["finished"] += 1
+            # Only increment the counter once per file — guard against
+            # _update_file being called a second time with a terminal status
+            # (e.g. on an error path after the first terminal call).
+            if entry.get("_counted") is not True:
+                entry["_counted"] = True
+                job["finished"] += 1
             if record is not None:
                 record["_elapsed_seconds"] = entry["elapsed_seconds"]
                 job["results"].append(record)
@@ -159,7 +164,7 @@ def _finish_job(app, job_id: str) -> None:
                 from vim.validation_setup.validation.run_validation import run_validation
 
                 try:
-                    run_validation()
+                    run_validation(invoice_ids=invoice_ids if invoice_ids else None)
                 finally:
                     db.session.remove()
         except Exception as e:

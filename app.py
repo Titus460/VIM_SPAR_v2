@@ -23,15 +23,18 @@ def create_app():
 
     app = Flask(__name__)
 
-    # secret_key = os.getenv("SECRET_KEY", "").strip()
-    # if not secret_key:
-    #     raise RuntimeError(
-    #         "SECRET_KEY is not set. Add SECRET_KEY=<random-string> to your .env file.\n"
-    #         "  Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
-    #     )
-    # app.secret_key = secret_key
-    
-    app.secret_key = os.urandom(16)
+    # Auto-generate a secret key on first run and save it so sessions
+    # survive server restarts without any manual configuration.
+    _key_file = Path(__file__).resolve().parent / "instance" / "secret.key"
+    _key_file.parent.mkdir(parents=True, exist_ok=True)
+    if _key_file.exists():
+        app.secret_key = _key_file.read_bytes()
+    else:
+        import secrets as _secrets
+        _key = _secrets.token_bytes(32)
+        _key_file.write_bytes(_key)
+        app.secret_key = _key
+        logger.info("Generated new secret key -> instance/secret.key")
     logger.info("SECRET_KEY loaded OK")
 
     app.debug = True
@@ -42,9 +45,7 @@ def create_app():
     db_path = Path(__file__).resolve().parent / "instance" / "vim_database.sqlite"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    app.config["SQLALCHEMY_DATABASE_URI"] = (
-        "sqlite:///vim_database.sqlite"
-    )
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
 
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 

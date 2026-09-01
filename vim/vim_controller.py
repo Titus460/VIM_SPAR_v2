@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 
 from flask import app, render_template, redirect, request, url_for, flash, session, Response
+from werkzeug.security import check_password_hash, generate_password_hash
 from yaml import load_all
 from vim_database.models import User, Vendor, ValidationResult, RejectedDocument, Approval
 from vim_database.models import SystemConfiguration
@@ -30,6 +31,9 @@ def register_routes(app):
     def admin_required(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
+            if 'user_id' not in session:
+                flash("Please log in to continue.", "warning")
+                return redirect(url_for('login'))
             if session.get('role') != 'admin':
                 flash("Admin access required.", "danger")
                 return redirect(url_for('login'))
@@ -40,6 +44,9 @@ def register_routes(app):
     def approver_required(view):
        @wraps(view)
        def wrapped(*args, **kwargs):
+           if 'user_id' not in session:
+               flash("Please log in to continue.", "warning")
+               return redirect(url_for('login'))
            if session.get('role') != 'approver':
                flash("Approver access required.", "danger")
                return redirect(url_for('login'))
@@ -66,13 +73,16 @@ def register_routes(app):
         if request.method == 'POST':
             email = request.form.get('email')
             password = request.form.get('password')
+            logger.info("[AUTH] Login attempt for email: %s", email)
 
             this_user = User.query.filter_by(Email=email).first()
 
             if this_user:
-                if this_user.PasswordHash == password:
+                if check_password_hash(this_user.PasswordHash, password):
                     session['user_id'] = this_user.UserID
                     session['role'] = this_user.Role
+                    logger.info("[AUTH] Login successful: UserID=%s, Role=%s, Username='%s'",
+                                this_user.UserID, this_user.Role, this_user.Username)
                     flash(f"Welcome back, {this_user.Username}!", "success")
                     if this_user.Role == 'admin':
                         return redirect(url_for('admin_activities'))
@@ -81,8 +91,10 @@ def register_routes(app):
                     else:
                         return redirect(url_for('user_home', user_id=this_user.UserID))
                 else:
+                    logger.warning("[AUTH] Password incorrect for email: %s", email)
                     flash("Incorrect password. Please try again.", "danger")
             else:
+                logger.warning("[AUTH] User not found for email: %s", email)
                 flash("User not found. Please register first.", "warning")
 
         return render_template('login.html')
@@ -90,6 +102,8 @@ def register_routes(app):
     # ---------------- LOGOUT ----------------
     @app.route('/logout')
     def logout():
+        user_id = session.get('user_id')
+        logger.info("[AUTH] User logged out: UserID=%s", user_id)
         session.clear()
         flash("You've been logged out.", "success")
         return redirect(url_for('login'))
@@ -162,7 +176,7 @@ def register_routes(app):
             user = User(
                 Username=request.form['username'],
                 Email=request.form['email'],
-                PasswordHash=request.form['password'],
+                PasswordHash=generate_password_hash(request.form['password']),
                 Role=request.form['role'],
                 VendorID=int(request.form['vendor_id']),
                 IsActive=bool(
@@ -294,6 +308,19 @@ def register_routes(app):
  
             if not approver:
                 flash("Selected user is not an active approver.", "danger")
+                return redirect(url_for('admin_approval'))
+
+            # -------Guard: prevent duplicate pending approvals--------
+            existing_approval = Approval.query.filter_by(
+                InvoiceID=invoice_id,
+                ApproverUserID=approver.UserID,
+                ApprovalStatus='Pending'
+            ).first()
+            if existing_approval:
+                flash(
+                    f"Invoice is already pending approval by {approver.Username}.",
+                    "warning"
+                )
                 return redirect(url_for('admin_approval'))
            
             # -------Added ApprovalDate when the invoice is assigned to an approver--------
@@ -827,7 +854,9 @@ def register_routes(app):
 
         if request.method == 'POST' and keys_ok:
             files = request.files.getlist('invoice_files')
+            logger.info("[UPLOAD] User %s posted %d file(s)", session.get('user_id'), len(files))
             if not files or all(not f.filename for f in files):
+                logger.warning("[UPLOAD] No valid files in upload request")
                 flash("Please select at least one invoice file.", "warning")
                 return redirect(url_for('admin_invoice_upload'))
 
@@ -846,24 +875,32 @@ def register_routes(app):
                 if not f.filename:
                     continue
                 try:
-                    staged.append(stage_upload(f))
+                    saved_path, orig_name = stage_upload(f)
+                    staged.append((saved_path, orig_name))
+                    logger.debug("[UPLOAD] Staged file '%s' -> %s", orig_name, saved_path)
                 except ValueError as e:
+                    logger.warning("[UPLOAD] Validation error for '%s': %s", f.filename, e)
                     flash(str(e), "danger")
                 except OSError as e:
+                    logger.error("[UPLOAD] OS error saving '%s': %s", f.filename, e)
                     flash(str(e).strip(), "danger")
                     break
                 except Exception as e:
+                    logger.error("[UPLOAD] Failed to save '%s': %s", f.filename, e, exc_info=True)
                     flash(f"Could not save {f.filename}: {e}", "danger")
 
             if not staged:
+                logger.warning("[UPLOAD] No files staged successfully")
                 return redirect(url_for('admin_invoice_upload'))
 
             job_id = jobs.create_job(staged)
+            logger.info("[UPLOAD] Created extraction job '%s' for %d staged file(s)", job_id, len(staged))
             jobs.start_job(current_app._get_current_object(), job_id, staged)
 
             return redirect(url_for('admin_invoice_upload_progress', job_id=job_id))
 
         elif request.method == 'POST' and not keys_ok:
+            logger.error("[UPLOAD] Upload attempted but API keys are not loaded")
             flash(
                 "API keys not loaded. Save .env in the project root and restart the server.",
                 "danger",
@@ -1225,6 +1262,8 @@ def register_routes(app):
 
         action = request.form.get('action')
         stored_name = request.form.get('stored_file_name')
+        logger.info("[VENDOR-DECIDE] User=%s action='%s' for stored_file='%s'",
+                    session.get('user_id'), action, stored_name)
 
         pending = session.get('pending_new_vendor') or []
         entry = next(
@@ -1232,6 +1271,7 @@ def register_routes(app):
             None,
         )
         if entry is None:
+            logger.warning("[VENDOR-DECIDE] Upload '%s' not found in pending session list", stored_name)
             flash("That upload is no longer awaiting a vendor decision.", "warning")
             return redirect(url_for('admin_invoice_upload'))
 
@@ -1239,6 +1279,7 @@ def register_routes(app):
         vendor_name = entry.get('vendor_name') or 'this vendor'
 
         if action == 'stop':
+            logger.info("[VENDOR-DECIDE] Stopping upload '%s' for vendor '%s'", original_name, vendor_name)
             discard_pending_upload(
                 stored_name, original_name, user_id=session.get("user_id")
             )
@@ -1249,16 +1290,21 @@ def register_routes(app):
             )
 
         elif action == 'proceed':
+            logger.info("[VENDOR-DECIDE] Proceeding with registration for vendor '%s' (file='%s')",
+                        vendor_name, original_name)
             try:
                 record = persist_approved_vendor(
                     stored_name, original_name, user_id=session.get("user_id")
                 )
             except Exception as e:
+                logger.error("[VENDOR-DECIDE] Failed to persist vendor '%s': %s", vendor_name, e, exc_info=True)
                 flash(f"Could not register {vendor_name}: {e}", "danger")
                 return redirect(url_for('admin_invoice_upload'))
 
             invoice_id = record.get("invoice_id")
             if invoice_id is None:
+                logger.warning("[VENDOR-DECIDE] Registered '%s' but invoice was not saved: %s",
+                               vendor_name, record.get('_db_error') or record.get('status'))
                 flash(
                     f"Registered '{vendor_name}' but the invoice was not saved: "
                     f"{record.get('_db_error') or record.get('status')}",
@@ -1271,19 +1317,22 @@ def register_routes(app):
                     from vim.validation_setup.validation.run_validation import (
                         run_validation,
                     )
-                    run_validation()
+                    logger.info("[VENDOR-DECIDE] Triggering validation for new invoice_id=%s", invoice_id)
+                    run_validation(invoice_ids=[int(invoice_id)])
                     flash(
                         f"Registered '{vendor_name}' and saved invoice "
                         f"{record.get('invoice_number') or invoice_id}.",
                         "success",
                     )
                 except Exception as e:
+                    logger.error("[VENDOR-DECIDE] Validation failed for invoice_id=%s: %s", invoice_id, e, exc_info=True)
                     flash(
                         f"Registered '{vendor_name}' and saved the invoice, "
                         f"but validation failed: {e}",
                         "danger",
                     )
         else:
+            logger.warning("[VENDOR-DECIDE] Unknown action '%s'", action)
             flash("Unknown action.", "warning")
 
         session['pending_new_vendor'] = [
@@ -1296,17 +1345,20 @@ def register_routes(app):
         """Run the pipeline on a rejected document the user chose to keep."""
         from vim.extraction.service import process_saved_file
 
+        logger.info("[FORCE-PROCESS] Forcing pipeline on '%s' (%s)", original_name, saved_path)
         try:
             record = process_saved_file(
                 saved_path, original_name, skip_invoice_check=True
             )
         except Exception as e:
+            logger.error("[FORCE-PROCESS] Failed on '%s': %s", original_name, e, exc_info=True)
             flash(f"Failed to process '{original_name}': {e}", "danger")
             return
 
         invoice_id = record.get("invoice_id")
         if invoice_id is None:
             if record.get("status") == "vendor_not_registered":
+                logger.info("[FORCE-PROCESS] '%s' requires vendor registration", original_name)
                 _remember_pending_new_vendor([record])
                 return
             reason = (
@@ -1315,6 +1367,7 @@ def register_routes(app):
                 or record.get("status")
                 or "unknown error"
             )
+            logger.warning("[FORCE-PROCESS] '%s' not saved: %s", original_name, reason)
             flash(
                 f"Processed '{original_name}' but nothing was saved: {reason}",
                 "warning",
@@ -1331,13 +1384,15 @@ def register_routes(app):
 
         try:
             from vim.validation_setup.validation.run_validation import run_validation
-            run_validation()
+            logger.info("[FORCE-PROCESS] Triggering validation for invoice_id=%s", invoice_id)
+            run_validation(invoice_ids=[int(invoice_id)])
             flash(
                 f"Processed '{original_name}' as an invoice and saved it "
                 f"(invoice ID {invoice_id}).",
                 "success",
             )
         except Exception as e:
+            logger.error("[FORCE-PROCESS] Validation failed for invoice_id=%s: %s", invoice_id, e, exc_info=True)
             flash(
                 f"Saved '{original_name}' (invoice ID {invoice_id}), "
                 f"but validation failed: {e}",

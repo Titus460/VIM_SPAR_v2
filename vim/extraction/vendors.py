@@ -4,6 +4,9 @@ import re
  
 from vim_database.database import db
 from vim_database.models import Vendor
+from vim_logger import get_logger
+ 
+logger = get_logger("vim.extraction.vendors")
  
 # Company-form words dropped when comparing names, so "SPAR Information
 # Systems LLC" and "SPAR Information Systems, L.L.C." are recognised as the
@@ -47,10 +50,15 @@ def find_registered_vendor(vendor_name: str | None) -> Vendor | None:
         return None
  
     normalized = str(vendor_name).strip()
-    return Vendor.query.filter(
+    vendor = Vendor.query.filter(
         db.func.lower(Vendor.VendorName) == normalized.lower(),
         Vendor.Status == 1,
     ).first()
+    if vendor:
+        logger.debug("[VENDOR] Found active vendor '%s' (VendorID=%s)", vendor.VendorName, vendor.VendorID)
+    else:
+        logger.debug("[VENDOR] No active vendor found for '%s'", normalized)
+    return vendor
  
  
 def find_vendor_any_status(vendor_name: str | None) -> Vendor | None:
@@ -75,6 +83,8 @@ def find_vendor_by_match_key(vendor_name: str | None) -> Vendor | None:
  
     for vendor in Vendor.query.filter_by(Status=1).order_by(Vendor.VendorID):
         if match_key(vendor.VendorName) == key:
+            logger.info("[VENDOR] Fuzzy match key '%s' matched registered vendor '%s' (VendorID=%s)",
+                        key, vendor.VendorName, vendor.VendorID)
             return vendor
     return None
  
@@ -137,8 +147,10 @@ def find_or_create_vendor(record: dict, *, create: bool = True) -> tuple[Vendor 
     """
     vendor_name = _fit(record.get("vendor_name"), 100)
     if not vendor_name:
+        logger.warning("[VENDOR] find_or_create_vendor: vendor_name is empty in record")
         return None, "unknown"
  
+    logger.info("[VENDOR] Resolving vendor: '%s' (create=%s)", vendor_name, create)
     vendor = find_registered_vendor(vendor_name)
     action = "matched"
  
@@ -147,9 +159,11 @@ def find_or_create_vendor(record: dict, *, create: bool = True) -> tuple[Vendor 
         if existing:
             existing.Status = 1
             vendor, action = existing, "reactivated"
+            logger.info("[VENDOR] Reactivated existing vendor '%s' (VendorID=%s)", vendor.VendorName, vendor.VendorID)
         elif (similar := find_vendor_by_match_key(vendor_name)) is not None:
             # Same company, different punctuation or company form.
             vendor, action = similar, "matched"
+            logger.info("[VENDOR] Matched similar vendor '%s' (VendorID=%s)", vendor.VendorName, vendor.VendorID)
         elif create:
             # GSTNumber and Email are NOT NULL, so they start as empty strings
             # and _fill_blank_details populates them when the invoice shows them.
@@ -161,10 +175,14 @@ def find_or_create_vendor(record: dict, *, create: bool = True) -> tuple[Vendor 
             )
             db.session.add(vendor)
             action = "created"
+            logger.info("[VENDOR] Created new vendor row for '%s'", vendor_name)
         else:
+            logger.info("[VENDOR] Vendor '%s' is unknown and create=False", vendor_name)
             return None, "unknown"
  
-    _fill_blank_details(vendor, record)
+    filled = _fill_blank_details(vendor, record)
+    if filled:
+        logger.debug("[VENDOR] Filled blank details on vendor '%s': %s", vendor.VendorName, filled)
     db.session.flush()
     return vendor, action
  

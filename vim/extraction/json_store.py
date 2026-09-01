@@ -6,7 +6,10 @@ import threading
 from pathlib import Path
  
 from vim.extraction import config
- 
+from vim_logger import get_logger
+
+logger = get_logger("vim.extraction.json_store")
+
 ENRICHED_PATH = config.OUTPUT_DIR / "enriched.json"
  
 # Every update is a read-modify-write of the whole file, and uploads are now
@@ -18,9 +21,16 @@ _file_lock = threading.RLock()
 def load_all() -> list[dict]:
     with _file_lock:
         if not ENRICHED_PATH.exists():
+            logger.debug("[JSON_STORE] %s does not exist, returning empty list", ENRICHED_PATH)
             return []
-        data = json.loads(ENRICHED_PATH.read_text(encoding="utf-8"))
-    return data if isinstance(data, list) else []
+        try:
+            data = json.loads(ENRICHED_PATH.read_text(encoding="utf-8"))
+            records = data if isinstance(data, list) else []
+            logger.debug("[JSON_STORE] Loaded %d record(s) from %s", len(records), ENRICHED_PATH)
+            return records
+        except Exception as e:
+            logger.error("[JSON_STORE] Error loading JSON from %s: %s", ENRICHED_PATH, e, exc_info=True)
+            return []
  
  
 def save_all(records: list[dict]) -> Path:
@@ -36,6 +46,7 @@ def save_all(records: list[dict]) -> Path:
         tmp_path = ENRICHED_PATH.with_suffix(".json.tmp")
         tmp_path.write_text(payload, encoding="utf-8")
         os.replace(tmp_path, ENRICHED_PATH)
+        logger.info("[JSON_STORE] Saved %d record(s) to %s", len(enriched), ENRICHED_PATH)
  
     return ENRICHED_PATH
  
@@ -80,8 +91,10 @@ def delete_record(key: str, stored_file_name: str | None = None) -> bool:
         records = _dedupe_records(load_all())
         remaining = [r for r in records if not is_target(r)]
         if len(remaining) == len(records):
+            logger.debug("[JSON_STORE] delete_record: key='%s', stored='%s' not found", key, stored_file_name)
             return False
         save_all(remaining)
+        logger.info("[JSON_STORE] Deleted record key='%s', stored='%s'", key, stored_file_name)
     return True
  
  
@@ -91,19 +104,23 @@ def find_by_stored_name(stored_file_name: str) -> dict | None:
         return None
     for rec in load_all():
         if rec.get("stored_file_name") == stored_file_name:
+            logger.debug("[JSON_STORE] Found record for stored_file_name='%s'", stored_file_name)
             return rec
+    logger.debug("[JSON_STORE] No record found for stored_file_name='%s'", stored_file_name)
     return None
  
  
 def upsert_record(record: dict) -> Path:
     """Insert or update one record in enriched.json (matched by file_name)."""
     key = _record_key(record)
+    logger.debug("[JSON_STORE] Upserting record key='%s' (status='%s')", key, record.get("status"))
  
     with _file_lock:
         records = _dedupe_records(load_all())
  
         if not key:
             records.append(record)
+            logger.info("[JSON_STORE] Appended unkeyed record (total=%d)", len(records))
             return save_all(records)
  
         updated = False
@@ -111,7 +128,9 @@ def upsert_record(record: dict) -> Path:
             if _record_key(existing) == key:
                 records[i] = record
                 updated = True
+                logger.debug("[JSON_STORE] Updated existing record for key='%s'", key)
                 break
         if not updated:
             records.append(record)
+            logger.debug("[JSON_STORE] Appended new record for key='%s'", key)
         return save_all(records)

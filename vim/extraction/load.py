@@ -13,6 +13,9 @@ from vim_database.models import (
     InvoiceLineItem,
     OCRExtraction,
 )
+from vim_logger import get_logger
+ 
+logger = get_logger("vim.extraction.load")
  
  
 def _get(record: dict, field, default=None):
@@ -74,19 +77,23 @@ def _find_vendor(record: dict) -> Vendor:
     if not vendor_name:
         raise ValueError("vendor_name is required")
  
+    logger.debug("[LOAD] Looking up vendor '%s'", vendor_name)
     vendor = Vendor.query.filter(
         db.func.lower(Vendor.VendorName) == str(vendor_name).strip().lower(),
         Vendor.Status == 1,
     ).first()
     if vendor:
+        logger.debug("[LOAD] Vendor found by name: VendorID=%s", vendor.VendorID)
         return vendor
  
     vendor_id = record.get("vendor_id")
     if vendor_id:
         vendor = db.session.get(Vendor, vendor_id)
         if vendor and vendor.Status == 1:
+            logger.debug("[LOAD] Vendor found by ID: VendorID=%s", vendor.VendorID)
             return vendor
  
+    logger.warning("[LOAD] Vendor '%s' not registered", vendor_name)
     raise ValueError(f"Vendor {vendor_name!r} is not registered")
  
  
@@ -95,8 +102,10 @@ def _find_or_create_purchase_order(record: dict, vendor: Vendor, file_name: str)
  
     po = PurchaseOrder.query.filter_by(PONumber=po_number).first()
     if po:
+        logger.debug("[LOAD] Existing PO found: '%s'", po_number)
         return po
  
+    logger.info("[LOAD] Creating new PO: '%s' for VendorID=%s", po_number, vendor.VendorID)
     po = PurchaseOrder(
         PONumber=po_number,
         VendorID=vendor.VendorID,
@@ -126,6 +135,8 @@ def _upsert_ocr_extraction(document: InvoiceDocument, record: dict) -> None:
 def insert_record(record: dict) -> Invoice:
     """Insert or update invoice data from an enriched extraction record."""
     file_name = record.get("file_name")
+    logger.info("[LOAD] insert_record called for file='%s', invoice_number='%s'",
+                file_name, record.get("invoice_number"))
  
     vendor = _find_vendor(record)
     po = _find_or_create_purchase_order(record, vendor, file_name)

@@ -1,11 +1,16 @@
 from .base_stage import BaseStage
 import json
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from vim.extraction.vendors import find_registered_vendor
+from vim_logger import get_logger
+
+logger = get_logger("vim.validation.stages")
 
 # Tolerance for floating-point amount comparisons (±1 cent)
 _AMOUNT_TOLERANCE = 0.01
+_duplicate_lock = threading.Lock()
 
 class InvoiceCompletenessCheck(BaseStage):
 
@@ -26,17 +31,14 @@ class InvoiceCompletenessCheck(BaseStage):
         super().__init__("Invoice Completeness")
 
     def validate(self, invoice, context=None):
-
         missing_fields = []
-
         for field in self.REQUIRED_FIELDS:
-
             # Field must exist, but its value may be None
             if field not in invoice:
                 missing_fields.append(field)
 
         if missing_fields:
-
+            logger.debug("[STAGE-COMPLETENESS] Missing fields: %s", missing_fields)
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -46,6 +48,7 @@ class InvoiceCompletenessCheck(BaseStage):
                 }
             }
 
+        logger.debug("[STAGE-COMPLETENESS] All required fields present")
         return {
             "stage": self.name,
             "status": "PASSED",
@@ -87,15 +90,13 @@ class OcrConfidenceValidation(BaseStage):
         super().__init__("OCR Confidence")
 
     def validate(self, invoice, context=None):
-
         field_confidence = invoice.get("field_confidence")
 
         # ---------------------------------------------
         # 1. Confidence data is not available
         # ---------------------------------------------
-
         if not field_confidence:
-
+            logger.debug("[STAGE-OCR] Confidence data not available in record")
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -108,27 +109,16 @@ class OcrConfidenceValidation(BaseStage):
         # ---------------------------------------------
         # 2. Check confidence of available fields
         # ---------------------------------------------
-
         for field in self.CHECK_FIELDS:
-
-            # Get extracted value
             extracted_value = invoice.get(field)
-
-            # If field value is null, skip confidence check
             if extracted_value is None:
                 continue
 
-            # Get confidence score
             confidence = field_confidence.get(field)
-
-            # If confidence score is not available,
-            # skip this field
             if confidence is None:
                 continue
 
-            # Check against threshold
             if confidence < self.THRESHOLD:
-
                 low_confidence_fields.append({
                     "field": field,
                     "confidence": confidence
@@ -137,9 +127,9 @@ class OcrConfidenceValidation(BaseStage):
         # ---------------------------------------------
         # 3. Low confidence fields found
         # ---------------------------------------------
-
         if low_confidence_fields:
-
+            logger.debug("[STAGE-OCR] %d field(s) below threshold (%d): %s",
+                         len(low_confidence_fields), self.THRESHOLD, low_confidence_fields)
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -153,7 +143,7 @@ class OcrConfidenceValidation(BaseStage):
         # ---------------------------------------------
         # 4. OCR confidence passed
         # ---------------------------------------------
-
+        logger.debug("[STAGE-OCR] All checked fields above threshold (%d)", self.THRESHOLD)
         return {
             "stage": self.name,
             "status": "PASSED",
@@ -176,6 +166,7 @@ class VendorValidation(BaseStage):
         # 1. Vendor ID must be present
         # -------------------------------------------------
         if vendor_id is None:
+            logger.debug("[STAGE-VENDOR] vendor_id is missing")
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -187,6 +178,7 @@ class VendorValidation(BaseStage):
         # 2. Vendor name must be present
         # -------------------------------------------------
         if not vendor_name:
+            logger.debug("[STAGE-VENDOR] vendor_name is missing for vendor_id=%s", vendor_id)
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -201,6 +193,7 @@ class VendorValidation(BaseStage):
         # -------------------------------------------------
         vendor = find_registered_vendor(vendor_name)
         if not vendor:
+            logger.debug("[STAGE-VENDOR] Vendor '%s' is not registered or active", vendor_name)
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -215,6 +208,8 @@ class VendorValidation(BaseStage):
         # 4. Verify vendor ID
         # -------------------------------------------------
         if vendor.VendorID != vendor_id:
+            logger.debug("[STAGE-VENDOR] VendorID mismatch: extracted=%s, registered=%s for '%s'",
+                         vendor_id, vendor.VendorID, vendor_name)
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -229,6 +224,7 @@ class VendorValidation(BaseStage):
         # -------------------------------------------------
         # 5. Vendor successfully validated
         # -------------------------------------------------
+        logger.debug("[STAGE-VENDOR] Validated registered vendor: '%s' (VendorID=%s)", vendor.VendorName, vendor.VendorID)
         return {
             "stage": self.name,
             "status": "PASSED",
@@ -246,13 +242,12 @@ class POMatching(BaseStage):
         super().__init__("PO Matching")
 
     def validate(self, invoice, context=None):
-
         context = context or {}
         purchase_orders = context.get("purchase_orders", {})
-
         po_number = invoice.get("po_number")
 
         if not po_number:
+            logger.debug("[STAGE-PO] po_number is missing in invoice")
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -261,8 +256,8 @@ class POMatching(BaseStage):
             }
 
         po = purchase_orders.get(po_number)
-
         if not po:
+            logger.debug("[STAGE-PO] po_number '%s' not found in purchase_orders context", po_number)
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -272,6 +267,7 @@ class POMatching(BaseStage):
                 }
             }
 
+        logger.debug("[STAGE-PO] Matched PO '%s'", po_number)
         return {
             "stage": self.name,
             "status": "PASSED",
@@ -296,6 +292,7 @@ class TaxValidation(BaseStage):
         # TOTAL DUE IS REQUIRED
         # ----------------------------------------------------
         if total_due is None:
+            logger.debug("[STAGE-TAX] total_due is missing in invoice")
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -315,6 +312,8 @@ class TaxValidation(BaseStage):
             )
 
             if abs(calculated_total - actual_total) > _AMOUNT_TOLERANCE:
+                logger.debug("[STAGE-TAX] Subtotal (%s) + Tax (%s) = %s != Total (%s)",
+                             subtotal, tax_total, calculated_total, actual_total)
                 return {
                     "stage": self.name,
                     "status": "FAILED",
@@ -327,6 +326,8 @@ class TaxValidation(BaseStage):
                     }
                 }
 
+            logger.debug("[STAGE-TAX] Validated Subtotal (%s) + Tax (%s) == Total (%s)",
+                         subtotal, tax_total, actual_total)
             return {
                 "stage": self.name,
                 "status": "PASSED",
@@ -350,6 +351,7 @@ class TaxValidation(BaseStage):
             )
 
             if abs(calculated_total - actual_total) > _AMOUNT_TOLERANCE:
+                logger.debug("[STAGE-TAX] Subtotal (%s) != Total (%s) with no tax reported", subtotal, actual_total)
                 return {
                     "stage": self.name,
                     "status": "FAILED",
@@ -362,6 +364,7 @@ class TaxValidation(BaseStage):
                     }
                 }
 
+            logger.debug("[STAGE-TAX] Subtotal (%s) equals Total (%s) with no tax reported", subtotal, actual_total)
             return {
                 "stage": self.name,
                 "status": "PASSED",
@@ -396,6 +399,7 @@ class TaxValidation(BaseStage):
             # Tax is not available
             if tax_total is None:
                 if abs(calculated_subtotal - actual_total) > _AMOUNT_TOLERANCE:
+                    logger.debug("[STAGE-TAX] Line items (%s) != Total (%s)", calculated_subtotal, actual_total)
                     return {
                         "stage": self.name,
                         "status": "FAILED",
@@ -407,6 +411,7 @@ class TaxValidation(BaseStage):
                         }
                     }
 
+                logger.debug("[STAGE-TAX] Line items (%s) == Total (%s)", calculated_subtotal, actual_total)
                 return {
                     "stage": self.name,
                     "status": "PASSED",
@@ -422,6 +427,8 @@ class TaxValidation(BaseStage):
             calculated_total = round(calculated_subtotal + float(tax_total),2)
 
             if abs(calculated_total - actual_total) > _AMOUNT_TOLERANCE:
+                logger.debug("[STAGE-TAX] Line items (%s) + Tax (%s) = %s != Total (%s)",
+                             calculated_subtotal, tax_total, calculated_total, actual_total)
                 return {
                     "stage": self.name,
                     "status": "FAILED",
@@ -434,6 +441,8 @@ class TaxValidation(BaseStage):
                     }
                 }
 
+            logger.debug("[STAGE-TAX] Line items (%s) + Tax (%s) == Total (%s)",
+                         calculated_subtotal, tax_total, actual_total)
             return {
                 "stage": self.name,
                 "status": "PASSED",
@@ -450,6 +459,8 @@ class TaxValidation(BaseStage):
         # CASE 4:
         # NOT ENOUGH INFORMATION
         # ----------------------------------------------------
+        logger.debug("[STAGE-TAX] Insufficient info: subtotal=%s, tax_total=%s, total_due=%s",
+                     subtotal, tax_total, total_due)
         return {
             "stage": self.name,
             "status": "FAILED",
@@ -493,16 +504,12 @@ class DuplicateDetection(BaseStage):
             )
 
     def validate(self, invoice, context=None):
-
         invoice_id = invoice.get("invoice_id")
         invoice_number = invoice.get("invoice_number")
         vendor_id = invoice.get("vendor_id")
 
-        # --------------------------------------------------
-        # Check required fields
-        # --------------------------------------------------
-
         if not invoice_number:
+            logger.debug("[STAGE-DUPLICATE] invoice_number is missing")
             return {
                 "stage": self.name,
                 "status": "FAILED",
@@ -511,6 +518,7 @@ class DuplicateDetection(BaseStage):
             }
 
         if vendor_id is None:
+            logger.debug("[STAGE-DUPLICATE] vendor_id is None, skipping duplicate check")
             return {
                 "stage": self.name,
                 "status": "SKIPPED",
@@ -518,95 +526,56 @@ class DuplicateDetection(BaseStage):
                 "details": {}
             }
 
-        # --------------------------------------------------
-        # Read processed invoices
-        # --------------------------------------------------
-
-        try:
-            with open(
-                self.PROCESSED_INVOICES_FILE,
-                "r",
-                encoding="utf-8"
-            ) as file:
-                processed_invoices = json.load(file)
-
-        except (FileNotFoundError, json.JSONDecodeError):
-            processed_invoices = []
-
-        # --------------------------------------------------
-        # Calculate 30-day cutoff
-        # --------------------------------------------------
-
-        current_time = datetime.now()
-        cutoff_date = (
-            current_time - timedelta(days=30)
-        )
-
-        # --------------------------------------------------
-        # Remove invoices older than 30 days
-        # --------------------------------------------------
-
-        recent_invoices = []
-        for old_invoice in processed_invoices:
+        with _duplicate_lock:
             try:
-                processed_at = datetime.fromisoformat(
-                    old_invoice["processed_at"]
-                )
-                if processed_at >= cutoff_date:
-                    recent_invoices.append(old_invoice)
-            except (KeyError, ValueError):
-                continue
+                with open(self.PROCESSED_INVOICES_FILE, "r", encoding="utf-8") as file:
+                    processed_invoices = json.load(file)
+            except (FileNotFoundError, json.JSONDecodeError):
+                processed_invoices = []
 
-        # --------------------------------------------------
-        # Check whether this invoice already exists
-        # --------------------------------------------------
+            current_time = datetime.now()
+            cutoff_date = current_time - timedelta(days=30)
 
-        for old_invoice in recent_invoices:
-            if (
-                old_invoice["invoice_number"]
-                == invoice_number
-                and
-                old_invoice["vendor_id"]
-                == vendor_id
-            ):
-                # Save cleaned 30-day history
-                self._save_history(recent_invoices)
+            recent_invoices = []
+            for old_invoice in processed_invoices:
+                try:
+                    processed_at = datetime.fromisoformat(old_invoice["processed_at"])
+                    if processed_at >= cutoff_date:
+                        recent_invoices.append(old_invoice)
+                except (KeyError, ValueError):
+                    continue
 
-                return {
-                    "stage": self.name,
-                    "status": "FAILED",
-                    "message": "Duplicate invoice found within the last 30 days",
-                    "details": {
-                        "invoice_id": invoice_id,
-                        "invoice_number": invoice_number,
-                        "vendor_id": vendor_id,
-                        "previous_invoice_id":
-                            old_invoice["invoice_id"],
-                        "processed_at":
-                            old_invoice["processed_at"]
+            for old_invoice in recent_invoices:
+                if (
+                    str(old_invoice.get("invoice_number", "")).strip() == str(invoice_number).strip()
+                    and str(old_invoice.get("vendor_id", "")).strip() == str(vendor_id).strip()
+                ):
+                    self._save_history(recent_invoices)
+                    logger.warning("[STAGE-DUPLICATE] Duplicate found for inv_num='%s', vendor_id=%s (prev_id=%s)",
+                                   invoice_number, vendor_id, old_invoice.get("invoice_id"))
+                    return {
+                        "stage": self.name,
+                        "status": "FAILED",
+                        "message": "Duplicate invoice found within the last 30 days",
+                        "details": {
+                            "invoice_id": invoice_id,
+                            "invoice_number": invoice_number,
+                            "vendor_id": vendor_id,
+                            "previous_invoice_id": old_invoice.get("invoice_id"),
+                            "processed_at": old_invoice.get("processed_at")
+                        }
                     }
-                }
 
-        # --------------------------------------------------
-        # Invoice is NOT a duplicate
-        # Add it to processed history
-        # --------------------------------------------------
+            new_invoice = {
+                "invoice_id": invoice_id,
+                "invoice_number": invoice_number,
+                "vendor_id": vendor_id,
+                "processed_at": current_time.isoformat()
+            }
+            recent_invoices.append(new_invoice)
+            self._save_history(recent_invoices)
 
-        new_invoice = {
-            "invoice_id": invoice_id,
-            "invoice_number": invoice_number,
-            "vendor_id": vendor_id,
-            "processed_at": current_time.isoformat()
-        }
-
-        recent_invoices.append(new_invoice)
-
-        # --------------------------------------------------
-        # Save updated processed invoice history
-        # --------------------------------------------------
-
-        self._save_history(recent_invoices)
-
+        logger.debug("[STAGE-DUPLICATE] No duplicate found for inv_num='%s', vendor_id=%s", invoice_number, vendor_id)
         return {
             "stage": self.name,
             "status": "PASSED",
@@ -617,5 +586,4 @@ class DuplicateDetection(BaseStage):
                 "vendor_id": vendor_id,
                 "lookback_days": 30
             }
-
         }
