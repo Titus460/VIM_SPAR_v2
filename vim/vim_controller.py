@@ -2,10 +2,11 @@ from importlib.resources import files
 import mimetypes
 import time
 from pathlib import Path
+from datetime import datetime
 
 from flask import app, render_template, redirect, request, url_for, flash, session, Response
 from yaml import load_all
-from vim_database.models import User, Vendor, ValidationResult, RejectedDocument
+from vim_database.models import User, Vendor, ValidationResult, RejectedDocument, Approval
 from vim_database.models import SystemConfiguration
 from vim_database.database import db
 from functools import wraps
@@ -34,6 +35,16 @@ def register_routes(app):
                 return redirect(url_for('login'))
             return view(*args, **kwargs)
         return wrapped
+
+    # ---------------added for approver--------------------
+    def approver_required(view):
+       @wraps(view)
+       def wrapped(*args, **kwargs):
+           if session.get('role') != 'approver':
+               flash("Approver access required.", "danger")
+               return redirect(url_for('login'))
+           return view(*args, **kwargs)
+       return wrapped
 
     # ---------------- HOME ROUTE ----------------
     @app.route('/')
@@ -65,6 +76,8 @@ def register_routes(app):
                     flash(f"Welcome back, {this_user.Username}!", "success")
                     if this_user.Role == 'admin':
                         return redirect(url_for('admin_activities'))
+                    elif this_user.Role == 'approver':
+                        return redirect(url_for('approver_approvals'))
                     else:
                         return redirect(url_for('user_home', user_id=this_user.UserID))
                 else:
@@ -257,6 +270,108 @@ def register_routes(app):
             user=user,
             vendors=vendors
         )
+
+    # -----------added for approver-----------------
+    @app.route('/admin/approval', methods=['GET', 'POST'])
+    @admin_required
+    def admin_approval():
+ 
+        approvers = User.query.filter_by(
+            Role='approver',
+            IsActive=True
+        ).all()
+ 
+        if request.method == 'POST':
+ 
+            invoice_id = request.form.get('invoice_id')
+            approver_user_id = request.form.get('approver_user_id')
+ 
+            approver = User.query.filter_by(
+                UserID=approver_user_id,
+                Role='approver',
+                IsActive=True
+            ).first()
+ 
+            if not approver:
+                flash("Selected user is not an active approver.", "danger")
+                return redirect(url_for('admin_approval'))
+           
+            # -------Added ApprovalDate when the invoice is assigned to an approver--------
+            approval = Approval(
+                InvoiceID=invoice_id,
+                ApproverUserID=approver.UserID,
+                ApprovalStatus='Pending',
+                ApprovalDate=datetime.now()
+            )
+ 
+            db.session.add(approval)
+            db.session.commit()
+ 
+            flash(
+                f"Invoice assigned to {approver.Username}.",
+                "success"
+            )
+ 
+            return redirect(url_for('admin_approval'))
+ 
+        approvals = Approval.query.order_by(
+            Approval.ApprovalID.desc()
+        ).all()
+ 
+        return render_template(
+            'vim_admin_approval.html',
+            approvers=approvers,
+            approvals=approvals
+        )
+ 
+     # --------------------Added Approver Approval page----------------------------
+    @app.route('/approver/approvals')
+    @approver_required
+    def approver_approvals():
+ 
+        approver_user_id = session.get('user_id')
+ 
+        approvals = Approval.query.filter_by(
+            ApproverUserID=approver_user_id,
+            ApprovalStatus='Pending'
+        ).order_by(
+            Approval.ApprovalID.desc()
+        ).all()
+ 
+        return render_template(
+            'vim_approver_approvals.html',
+            approvals=approvals
+        )
+    # ---------------Added Approve/Reject route--------------------
+    @app.route('/approver/decision/<int:approval_id>', methods=['POST'])
+    @approver_required
+    def approver_decision(approval_id):
+ 
+        approver_user_id = session.get('user_id')
+ 
+        approval = Approval.query.filter_by(
+            ApprovalID=approval_id,
+            ApproverUserID=approver_user_id,
+            ApprovalStatus='Pending'
+        ).first_or_404()
+ 
+        decision = request.form.get('decision')
+ 
+        if decision not in ['Approved', 'Rejected']:
+           flash("Invalid approval decision.", "danger")
+           return redirect(url_for('approver_approvals'))
+ 
+        approval.ApprovalStatus = decision
+        approval.ApprovalDate = datetime.now()
+ 
+        db.session.commit()
+ 
+        flash(
+             f"Invoice {decision.lower()} successfully.",
+             "success"
+        )
+ 
+        return redirect(url_for('approver_approvals'))
         
     # -----------------VENDOR Management ------------------------
     

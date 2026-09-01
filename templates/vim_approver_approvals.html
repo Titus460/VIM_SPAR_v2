@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Approvals</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background: #f5f7fb;
+        }
+
+        h1 {
+            color: #1f4e79;
+        }
+
+        .card {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th, td {
+            padding: 12px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+
+        th {
+            background: #e8eef7;
+        }
+
+        button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-right: 5px;
+        }
+
+        .approve {
+            background: #198754;
+            color: white;
+        }
+
+        .reject {
+            background: #dc3545;
+            color: white;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>My Approvals</h1>
+
+    <div class="card">
+
+        <h2>Pending Approval Requests</h2>
+
+        <table>
+
+            <thead>
+                <tr>
+                    <th>Approval ID</th>
+                    <th>Invoice ID</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                {% for approval in approvals %}
+
+                <tr>
+
+                    <td>
+                        {{ approval.ApprovalID }}
+                    </td>
+
+                    <td>
+                        {{ approval.InvoiceID }}
+                    </td>
+
+                    <td>
+                        {{ approval.ApprovalStatus }}
+                    </td>
+
+                    <td>
+
+                        <form method="POST"
+                              action="{{ url_for('approver_decision', approval_id=approval.ApprovalID) }}"
+                              style="display:inline;">
+
+                            <input type="hidden"
+                                   name="decision"
+                                   value="Approved">
+
+                            <button type="submit"
+                                    class="approve">
+                                Approve
+                            </button>
+
+                        </form>
+
+
+                        <form method="POST"
+                              action="{{ url_for('approver_decision', approval_id=approval.ApprovalID) }}"
+                              style="display:inline;">
+
+                            <input type="hidden"
+                                   name="decision"
+                                   value="Rejected">
+
+                            <button type="submit"
+                                    class="reject">
+                                Reject
+                            </button>
+
+                        </form>
+
+                    </td>
+
+                </tr>
+
+                {% else %}
+
+                <tr>
+                    <td colspan="4">
+                        No pending approvals.
+                    </td>
+                </tr>
+
+                {% endfor %}
+
+            </tbody>
+
+        </table>
+
+    </div>
+
+</body>
+</html>
