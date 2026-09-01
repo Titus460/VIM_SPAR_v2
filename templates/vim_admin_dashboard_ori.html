@@ -30,12 +30,6 @@
     </div>
 
     <div class="card">
-        <h3>🗂 Rejected Documents</h3>
-        <p>Review uploads held because they did not look like invoices, or because the vendor is not registered.</p>
-        <a class="button" href="/admin/rejected_documents">Open</a>
-    </div>
-
-    <div class="card">
         <h3>🤖 Invoice Data Extraction</h3>
         <p>Extract invoice details automatically using OCR and AI-powered document processing.</p>
         <a class="button" href="/admin/invoice_extraction">Open</a>
@@ -64,6 +58,12 @@
         <p>Manage policies, contracts, vendor documents, and RAG knowledge sources.</p>
         <a class="button" href="/admin/knowledgebase">Open</a>
     </div> -->
+
+    <div class="card">
+        <h3>🔁 Pipeline Monitor</h3>
+        <p>Track each invoice through the end-to-end processing pipeline — from upload to payment.</p>
+        <a class="button" href="{{ url_for('admin_pipeline_monitor') }}">Open</a>
+    </div>
 
     <div class="card">
         <h3>📈 Analytics & Dashboard</h3>

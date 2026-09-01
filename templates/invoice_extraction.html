@@ -22,6 +22,7 @@
                 <thead>
                     <tr>
                         <th>Document</th>
+                        <th>Type</th>
                         <th>Vendor</th>
                         <th>Invoice #</th>
                         <th>Date</th>
@@ -35,6 +36,7 @@
                     {% for row in extractions %}
                     <tr>
                         <td>{{ row.file_name }}</td>
+                        <td>{{ row.document_type }}</td>
                         <td>{{ row.vendor_name }}</td>
                         <td>{{ row.invoice_number }}</td>
                         <td>{{ row.invoice_date }}</td>
